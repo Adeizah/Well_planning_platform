@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "project_name": "Example Development Well",
+  "well_name": "EX-01",
+  "status": "Planning",
+  "latitude": 4.8123,
+  "longitude": 6.9834,
+  "elevation_m": 25.0,
+  "kb_m": 30.0,
+  "crs": "EPSG:4326",
+  "planned_date": "2026-10-06",
+  "north_reference": "True North",
+  "depth_reference": "MD / TVDSS",
+  "notes": "Example only.",
+  "surveys": [
+    {
+      "MD": 0.0,
+      "Inc": 0.0,
+      "Azi": 0.0
+    },
+    {
+      "MD": 500.0,
+      "Inc": 0.0,
+      "Azi": 0.0
+    },
+    {
+      "MD": 1000.0,
+      "Inc": 12.0,
+      "Azi": 45.0
+    },
+    {
+      "MD": 1500.0,
+      "Inc": 30.0,
+      "Azi": 55.0
+    },
+    {
+      "MD": 2000.0,
+      "Inc": 45.0,
+      "Azi": 60.0
+    }
+  ],
+  "targets": [
+    {
+      "name": "Target-A",
+      "north_m": 1200.0,
+      "east_m": 900.0,
+      "tvdss_m": -1800.0,
+      "radius_m": 50.0,
+      "priority": 1
+    }
+  ],
+  "offsets": [],
+  "model_metadata": {},
+  "trajectory_metadata": {}
+}
