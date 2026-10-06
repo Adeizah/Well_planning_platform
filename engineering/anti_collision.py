@@ -1,41 +1,29 @@
-
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-def clearance_report(main_df, offsets):
-    rows = []
-    if not offsets:
-        return pd.DataFrame([{
-            "Offset":"—",
-            "Minimum separation (m)":None,
-            "Status":"No offset trajectories supplied"
-        }])
-    for o in offsets:
-        name = o.get("name", "Offset")
-        if not o.get("surveys"):
-            rows.append({"Offset":name,"Minimum separation (m)":None,
-                         "Status":"No survey attached"})
+
+def _interp_xyz(df, md):
+    return np.array([np.interp(md, df["MD"], df[c]) for c in ["Easting","Northing","TVD"]], dtype=float)
+
+
+def clearance_report(main_df, offsets, sigma_main=0.0, sigma_offset=0.0):
+    rows=[]
+    if main_df is None or len(main_df) < 2:
+        return pd.DataFrame(columns=["offset","main_md_m","offset_md_m","separation_m","combined_uncertainty_m","separation_factor","status"])
+    for off in offsets:
+        odf = pd.DataFrame(off.get("surveys", []))
+        if not {"MD","Easting","Northing","TVD"}.issubset(odf.columns):
             continue
-        try:
-            off = pd.DataFrame(o["surveys"])
-            if not {"MD","Northing","Easting","TVD"}.issubset(off.columns):
-                rows.append({"Offset":name,"Minimum separation (m)":None,
-                             "Status":"Offset needs calculated coordinates"})
-                continue
-            common = np.unique(np.concatenate([
-                main_df["MD"].to_numpy(float), off["MD"].to_numpy(float)
-            ]))
-            mn = np.interp(common, main_df["MD"], main_df["Northing"])
-            me = np.interp(common, main_df["MD"], main_df["Easting"])
-            mt = np.interp(common, main_df["MD"], main_df["TVD"])
-            on = np.interp(common, off["MD"], off["Northing"])
-            oe = np.interp(common, off["MD"], off["Easting"])
-            ot = np.interp(common, off["MD"], off["TVD"])
-            sep = np.sqrt((mn-on)**2+(me-oe)**2+(mt-ot)**2)
-            rows.append({"Offset":name,"Minimum separation (m)":float(np.min(sep)),
-                         "MD at minimum (m)":float(common[np.argmin(sep)]),
-                         "Status":"Screened"})
-        except Exception as exc:
-            rows.append({"Offset":name,"Minimum separation (m)":None,
-                         "Status":f"Error: {exc}"})
+        lo=max(float(main_df.MD.min()), float(odf.MD.min())); hi=min(float(main_df.MD.max()), float(odf.MD.max()))
+        if hi <= lo: continue
+        grid=np.linspace(lo,hi, max(25, int((hi-lo)/30)+1))
+        best=None
+        for md in grid:
+            p=_interp_xyz(main_df,md)
+            q=_interp_xyz(odf,md)
+            sep=float(np.linalg.norm(p-q)); u=float(np.hypot(sigma_main,sigma_offset)); sf=sep/u if u>0 else np.inf
+            cand=(sep,md,sf)
+            if best is None or sep<best[0]: best=cand
+        sep,md,sf=best
+        rows.append({"offset":off.get("name","Offset"),"main_md_m":md,"offset_md_m":md,"separation_m":sep,"combined_uncertainty_m":u,"separation_factor":sf,"status":"REVIEW" if sf < 2.0 else "PASS"})
     return pd.DataFrame(rows)
