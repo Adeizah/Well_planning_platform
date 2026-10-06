@@ -1,17 +1,24 @@
 # Changelog
 
-## 1.0.0 — 2026-10-06
+## 5.0.0 — Desktop Engineering Workspace
 
-- Reframed the application as a project-independent well-planning platform.
-- Added project JSON import/export.
-- Added minimum-curvature survey engine.
-- Added 2D/3D trajectory visualization.
-- Added WMM2025 model integration using pure-Python pywmm.
-- Added live NOAA NGS geoid lookup.
-- Added local PROJ/pyproj coordinate transformation.
-- Added target and offset management.
-- Added anti-collision screening framework.
-- Added casing, hydraulics, well-control, cement and torque/drag screening modules.
-- Added QA/QC checks.
-- Added GitHub Actions tests.
-- Added Streamlit Community Cloud configuration.
+- Redesigned the application UI around a desktop/workstation well-planning workflow.
+- Added persistent project/well context header and status badge.
+- Added grouped, numbered module navigation for Setup, Directional, Drilling Engineering and Outputs.
+- Added dashboard engineering-pulse cards for current MD, survey count, targets, offsets, casing and reference corrections.
+- Added consistent module headers, helper panels, cards and data presentation styling.
+- Kept the v4.0 project schema unchanged to preserve JSON compatibility.
+- Added v5 UI contract/regression checks and cross-module engineering smoke tests.
+- No engineering calculation engine was replaced solely for the UI release.
+
+## 4.0.0 — Integrated Practice Release
+
+- Rebuilt the application around a v4 project schema.
+- Added flexible target geometry and target-driven trajectory planning.
+- Added integrated offset trajectories and visualization.
+- Added casing architecture and design screening.
+- Expanded hydraulics, T&D, cement and well-control screens.
+- Added BHA/drilling configuration.
+- Added integrated visualization for plan, vertical section and 3D views.
+- Added stronger project QA/QC and report export.
+- Clarified screening versus validated engineering status throughout the product.
