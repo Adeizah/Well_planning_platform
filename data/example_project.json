@@ -1,55 +1,38 @@
 {
-  "schema_version": "1.0",
-  "project_name": "Example Development Well",
+  "schema_version": "4.0",
+  "project_name": "Example Niger Delta Development Well",
   "well_name": "EX-01",
-  "status": "Planning",
+  "operator": "Training Operator",
+  "field": "Example Field",
+  "status": "Approved for Training",
+  "well_type": "Development Producer",
   "latitude": 4.8123,
   "longitude": 6.9834,
   "elevation_m": 25.0,
   "kb_m": 30.0,
   "crs": "EPSG:4326",
   "planned_date": "2026-10-06",
-  "north_reference": "True North",
+  "north_reference": "Grid North",
   "depth_reference": "MD / TVDSS",
-  "notes": "Example only.",
+  "design_constraints": {"max_dls_deg_30m": 3.0,"max_inclination_deg": 70.0,"max_build_rate_deg_30m": 3.0},
   "surveys": [
-    {
-      "MD": 0.0,
-      "Inc": 0.0,
-      "Azi": 0.0
-    },
-    {
-      "MD": 500.0,
-      "Inc": 0.0,
-      "Azi": 0.0
-    },
-    {
-      "MD": 1000.0,
-      "Inc": 12.0,
-      "Azi": 45.0
-    },
-    {
-      "MD": 1500.0,
-      "Inc": 30.0,
-      "Azi": 55.0
-    },
-    {
-      "MD": 2000.0,
-      "Inc": 45.0,
-      "Azi": 60.0
-    }
+    {"MD":0.0,"Inc":0.0,"Azi":0.0},
+    {"MD":500.0,"Inc":0.0,"Azi":0.0},
+    {"MD":1000.0,"Inc":12.0,"Azi":45.0},
+    {"MD":1500.0,"Inc":30.0,"Azi":55.0},
+    {"MD":2000.0,"Inc":45.0,"Azi":60.0}
   ],
   "targets": [
-    {
-      "name": "Target-A",
-      "north_m": 1200.0,
-      "east_m": 900.0,
-      "tvdss_m": -1800.0,
-      "radius_m": 50.0,
-      "priority": 1
-    }
+    {"name":"Target-Circle","type":"Circular","north_m":1200.0,"east_m":900.0,"tvdss_m":-1800.0,"radius_m":50.0},
+    {"name":"Target-Landing-Ellipse","type":"Elliptical","north_m":1500.0,"east_m":1300.0,"tvdss_m":-2500.0,"semi_major_m":150.0,"semi_minor_m":50.0,"orientation_deg":45.0}
   ],
   "offsets": [],
-  "model_metadata": {},
-  "trajectory_metadata": {}
+  "casing_program": [
+    {"string_no":1,"type":"Conductor","hole_size_in":24.0,"casing_od_in":18.625,"grade":"","weight_lbft":0,"shoe_md_m":250,"depth_type":"MD","shoe_tvd_m":250,"shoe_tvdss_m":220,"liner_top_md_m":0,"top_md_m":0,"remarks":"Training example"},
+    {"string_no":2,"type":"Surface","hole_size_in":17.5,"casing_od_in":13.375,"grade":"K-55","weight_lbft":72,"shoe_md_m":1150,"depth_type":"MD","shoe_tvd_m":1140,"shoe_tvdss_m":1110,"liner_top_md_m":0,"top_md_m":250,"remarks":"Training example"},
+    {"string_no":3,"type":"Intermediate","hole_size_in":12.25,"casing_od_in":9.625,"grade":"P-110","weight_lbft":47,"shoe_md_m":2750,"depth_type":"MD","shoe_tvd_m":2550,"shoe_tvdss_m":2520,"liner_top_md_m":0,"top_md_m":1150,"remarks":"Training example"},
+    {"string_no":4,"type":"Production","hole_size_in":8.5,"casing_od_in":7.0,"grade":"P-110","weight_lbft":29,"shoe_md_m":4250,"depth_type":"MD","shoe_tvd_m":3700,"shoe_tvdss_m":3670,"liner_top_md_m":0,"top_md_m":2750,"remarks":"Training example"}
+  ],
+  "reference_data": {"source_crs":"EPSG:4326","project_crs":"EPSG:4326"},
+  "notes": "Synthetic training case. Not a real field plan."
 }
