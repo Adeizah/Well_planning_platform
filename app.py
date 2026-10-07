@@ -61,7 +61,8 @@ def save():
 
 
 def download_json():
-    return json.dumps(project_to_json(project), indent=2).encode()
+    # Export the shared engineering model, not transient Streamlit widget state.
+    return json.dumps(project_to_json(project), indent=2, ensure_ascii=False).encode('utf-8')
 
 
 NAV = [
@@ -100,11 +101,18 @@ with st.sidebar:
     st.session_state.active_page = selected_page
     st.divider()
     st.download_button('⬇️ Export project JSON', download_json(), file_name=f"{project['well_name']}_project.json", mime='application/json', use_container_width=True)
-    upload = st.file_uploader('⬆️ Import project JSON', type='json')
+    upload = st.file_uploader('⬆️ Import project JSON', type='json', key='project_import')
     if upload:
         try:
-            st.session_state.project = project_from_json(json.load(upload))
+            candidate = project_from_json(json.load(upload))
+            # Validate before replacing the current session project.
+            checks = validate_project(candidate)
+            hard_failures = [c for c in checks if c.get('status') == 'FAIL']
+            if hard_failures:
+                raise ValueError('Project file failed validation: ' + '; '.join(c['message'] for c in hard_failures))
+            st.session_state.project = candidate
             st.session_state.active_page = 'Dashboard'
+            st.success(f"Imported {candidate.get('well_name','project')} successfully.")
             st.rerun()
         except Exception as e:
             st.error(str(e))
