@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-07 — Integrated engineering correction pass
+
+- Fixed WMM2025 integration to use the documented `pywmm` field getters with a compatible fallback path.
+- Fixed IGRF-14 date normalization for `ppigrf`.
+- Corrected DLS unit normalization between deg/30 m and deg/100 ft, including stored interval metadata.
+- Corrected survey TVDSS calculation to `KB elevation - TVD`.
+- Prevented survey/reference conversions from silently using zero declination or convergence when required data are missing.
+- Derived projected wellhead Easting/Northing from latitude/longitude for projected CRSs.
+- Corrected target handling so absolute project coordinates are converted to well-relative offsets for trajectory planning and visualization.
+- Expanded target coordinate ranges and made target vertical reference explicit.
+- Derived trajectory-planner azimuth from target displacement when not explicitly overridden.
+- Corrected offset surface translation for visualization and anti-collision screening.
+- Made coordinate-transformation labels reflect geographic vs projected CRS coordinates.
+- Added a clear NOAA GEOID18 coverage guard; GEOID18 is not a global service and is not applicable to the Nigeria training case.
+- Added regression tests for geomagnetic wrappers, convergence behavior, DLS normalization and offset translation.
+
+
 ## 5.0.0 — Desktop Engineering Workspace
 
 - Redesigned the application UI around a desktop/workstation well-planning workflow.

@@ -1,4 +1,4 @@
-# Well Planning Platform v5.0
+# Well Planning Platform
 
 A browser-first, project-independent drilling engineering and well-planning practice platform.
 
@@ -10,7 +10,7 @@ It is designed for students, trainees, drilling engineers, directional drillers,
 
 > **Engineering disclaimer:** This is practice and engineering-development software. It is not certified operational software and must not be the sole basis for drilling decisions. Validate calculations against applicable standards, company procedures, OEM data, specialist software and competent engineering review.
 
-## v5.0 highlights
+## Highlights
 
 - Desktop-first engineering workspace UI layered over the stable v4.0 project schema
 - CRS / datum / ellipsoid awareness through PROJ/pyproj
@@ -38,7 +38,7 @@ It is designed for students, trainees, drilling engineers, directional drillers,
 
 ## UI / UX philosophy
 
-Version 5.0 focuses on a desktop/workstation workflow rather than mobile/tablet optimization. The navigation is organized around the actual well-planning sequence, while the engineering engines and shared project schema remain backward-compatible with v4.0 project files.
+The current workspace focuses on a desktop/workstation workflow rather than mobile/tablet optimization. The navigation is organized around the actual well-planning sequence, while the engineering engines and shared project schema remain backward-compatible with v4.0 project files.
 
 ## Run locally
 
