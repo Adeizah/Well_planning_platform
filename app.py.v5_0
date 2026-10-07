@@ -20,7 +20,7 @@ from engineering.pressure import pressure_window
 from engineering.cement import cement_screen
 from engineering.torque_drag import torque_drag_screen
 
-st.set_page_config(page_title='Well Planning Platform v5.1', page_icon='🛢️', layout='wide', initial_sidebar_state='expanded')
+st.set_page_config(page_title='Well Planning Platform v5.0', page_icon='🛢️', layout='wide', initial_sidebar_state='expanded')
 
 # -----------------------------------------------------------------------------
 # v5.0 UI SYSTEM
@@ -85,11 +85,10 @@ if 'active_page' not in st.session_state:
     st.session_state.active_page = 'Dashboard'
 
 with st.sidebar:
-    st.markdown('<div class="wpp-brand">🛢️ Well Planning Platform</div><div class="wpp-version">v5.1 • desktop engineering workspace</div>', unsafe_allow_html=True)
+    st.markdown('<div class="wpp-brand">🛢️ Well Planning Platform</div><div class="wpp-version">v5.0 • desktop engineering workspace</div>', unsafe_allow_html=True)
     st.divider()
     project['project_name'] = st.text_input('Project', project.get('project_name', 'New Project'))
     project['well_name'] = st.text_input('Well', project.get('well_name', 'NEW-01'))
-    project['well_number'] = st.text_input('Well number', project.get('well_number', project.get('well_name', 'NEW-01')))
     st.markdown('**Workspace**')
     current_label = f"{NAV_PREFIX.get(st.session_state.active_page, '01')} • {st.session_state.active_page}"
     labels = [f"{NAV_PREFIX[x]} • {x}" for x in NAV_OPTIONS]
@@ -147,7 +146,7 @@ if page=='Dashboard':
     cols = st.columns(5)
     metrics = [
         ('STATUS', project.get('status', 'Planning'), project.get('well_type', '')),
-        ('CURRENT MD', f'{float(td)*3.280839895:,.0f} ft' if td is not None else '—', f'{len(surveys)} survey stations'),
+        ('CURRENT MD', f'{float(td):,.0f} m' if td is not None else '—', f'{len(surveys)} survey stations'),
         ('TARGETS', str(len(targets)), 'geometry objects'),
         ('OFFSETS', str(len(offsets)), 'reference wells'),
         ('CASING', str(len(casing)), 'stored strings'),
@@ -179,38 +178,14 @@ if page=='Dashboard':
 
 # Project & Reference
 elif page=='Project & Reference':
-    page_header('Well Setup & Reference Frame', 'SETUP', 'Define the well identity and design first. Coordinate-system, projection and model details are derived where possible rather than treated as fixed assumptions.')
-    st.markdown('### Well identity')
-    a,b,c,d=st.columns(4)
-    project['project_name']=a.text_input('Project name',project.get('project_name','New Well Planning Project'))
-    project['well_name']=b.text_input('Well name',project.get('well_name','NEW-01'))
-    project['well_number']=c.text_input('Well number',project.get('well_number',project.get('well_name','NEW-01')))
-    project['operator']=d.text_input('Operator',project.get('operator',''))
-    a,b,c,d=st.columns(4)
-    project['field']=a.text_input('Field / Asset',project.get('field',''))
-    project['site_pad']=b.text_input('Site / Pad',project.get('site_pad',''))
-    project['well_purpose']=c.selectbox('Well purpose',['Exploration','Appraisal','Development','Injection','Sidetrack','Other'],index=['Exploration','Appraisal','Development','Injection','Sidetrack','Other'].index(project.get('well_purpose','Development')))
-    project['well_design']=d.selectbox('Well design',['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'],index=['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'].index(project.get('well_design','Build & Hold')))
-
-    st.markdown('### Location & coordinate system')
-    a,b,c=st.columns(3); project['latitude']=a.number_input('Latitude (°)',-90.,90.,float(project['latitude']),format='%.6f'); project['longitude']=b.number_input('Longitude (°)',-180.,180.,float(project['longitude']),format='%.6f'); project['elevation_m']=c.number_input('Wellhead elevation (ft)',-6500.,33000.,float(project['elevation_m'])*3.280839895) / 3.280839895
-    crs_mode=st.selectbox('Coordinate system',['Auto UTM from location','Geographic WGS84','Custom CRS / EPSG'],index=0 if project.get('crs','EPSG:4326').startswith('EPSG:326') or project.get('crs','') in ('EPSG:4326','') else 2)
-    if crs_mode=='Auto UTM from location':
-        zone=int((float(project['longitude'])+180)//6)+1; epsg=32600+zone if float(project['latitude'])>=0 else 32700+zone; project['crs']=f'EPSG:{epsg}'
-    elif crs_mode=='Geographic WGS84':
-        project['crs']='EPSG:4326'
-    else:
-        project['crs']=st.text_input('Custom CRS / EPSG',project.get('crs','EPSG:4326'))
-    a,b,c=st.columns(3); project['kb_m']=a.number_input('KB elevation (ft)',-6500.,33000.,float(project['kb_m'])*3.280839895) / 3.280839895; project['planned_date']=str(b.date_input('Planning date',date.fromisoformat(project['planned_date']))); project['units']=c.selectbox('Display units',['Field','Metric'],index=0 if project.get('units','Field')=='Field' else 1)
-    st.markdown('### Derived reference information')
-    try:
-        ci=crs_info(project['crs']); conv=grid_convergence_deg(project['latitude'],project['longitude'],project['crs']); project['reference_data']['grid_convergence_deg']=conv; project['reference_data']['project_crs']=project['crs']; project['reference_data']['datum']=ci.get('datum'); project['reference_data']['ellipsoid']=ci.get('ellipsoid')
-        if ci.get('epsg'):
-            st.success(f"Active CRS: {ci['name']} • EPSG:{ci['epsg']} • Grid convergence: {conv:.4f}°")
-        else: st.success(f"Active CRS: {ci['name']} • Grid convergence: {conv:.4f}°")
-        st.dataframe(pd.DataFrame([ci]),use_container_width=True,hide_index=True)
-    except Exception as e: st.error(f'CRS/reference calculation error: {e}')
+    page_header('Project, CRS & Reference Frame', 'SETUP', 'Define the well identity, coordinate reference system, depth reference and design constraints used throughout the project.')
+    a,b,c=st.columns(3); project['latitude']=a.number_input('Latitude (°)',-90.,90.,float(project['latitude']),format='%.6f'); project['longitude']=b.number_input('Longitude (°)',-180.,180.,float(project['longitude']),format='%.6f'); project['elevation_m']=c.number_input('Wellhead elevation (m)',-2000.,10000.,float(project['elevation_m']))
+    a,b,c=st.columns(3); project['kb_m']=a.number_input('KB elevation (m)',-2000.,10000.,float(project['kb_m'])); project['crs']=b.text_input('Project CRS / EPSG',project.get('crs','EPSG:4326')); project['planned_date']=str(c.date_input('Planning date',date.fromisoformat(project['planned_date'])))
     a,b,c=st.columns(3); project['north_reference']=a.selectbox('Primary north reference',['True North','Grid North','Magnetic North'],index=['True North','Grid North','Magnetic North'].index(project.get('north_reference','Grid North'))); project['depth_reference']=b.selectbox('Depth reference',['MD / TVDSS','MD / TVD']); project['status']=c.selectbox('Project status',['Planning','Draft','Under Review','Approved for Training'],index=['Planning','Draft','Under Review','Approved for Training'].index(project.get('status','Planning')))
+    a,b,c=st.columns(3); project['operator']=a.text_input('Operator',project.get('operator','')); project['field']=b.text_input('Field',project.get('field','')); project['well_type']=c.selectbox('Well type',['Exploration','Appraisal','Development Producer','Development Injector','Sidetrack','Horizontal','Other'],index=0)
+    st.markdown('### CRS information')
+    try: st.dataframe(pd.DataFrame([crs_info(project['crs'])]),use_container_width=True,hide_index=True)
+    except Exception as e: st.error(f'CRS error: {e}')
     st.markdown('### Design constraints')
     dc=project['design_constraints']; a,b,c=st.columns(3); dc['max_dls_deg_30m']=a.number_input('Max DLS (°/30 m)',.1,20.,float(dc['max_dls_deg_30m'])); dc['max_inclination_deg']=b.number_input('Max inclination (°)',0.,180.,float(dc['max_inclination_deg'])); dc['max_build_rate_deg_30m']=c.number_input('Max build rate (°/30 m)',.1,20.,float(dc['max_build_rate_deg_30m']))
     if st.button('Save project/reference settings',type='primary'): save(); st.success('Saved.')
@@ -312,9 +287,7 @@ elif page=='Geomagnetics':
         try:
             r=wmm2025(lat,lon,alt,dt); ref=project['reference_data']; ref.update({'magnetic_declination_deg':r['D'],'magnetic_dip_deg':r['I'],'magnetic_total_field_nT':r['F'],'magnetic_horizontal_field_nT':r['H'],'magnetic_x_nT':r['X'],'magnetic_y_nT':r['Y'],'magnetic_z_nT':r['Z']}); project['model_metadata']['WMM2025']=r['metadata']; save(); st.success('WMM2025 result stored.')
         except Exception as e: st.error(f'WMM calculation failed: {e}')
-    r=project['reference_data']; st.dataframe(pd.DataFrame([{'Quantity':'Declination','Value':r.get('magnetic_declination_deg'),'Unit':'deg'},{'Quantity':'Dip','Value':r.get('magnetic_dip_deg'),'Unit':'deg'},{'Quantity':'Total field','Value':r.get('magnetic_total_field_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
-    with st.expander('Advanced model details — field components'):
-        st.dataframe(pd.DataFrame([{'Component':'X','Value':r.get('magnetic_x_nT'),'Unit':'nT'},{'Component':'Y','Value':r.get('magnetic_y_nT'),'Unit':'nT'},{'Component':'Z','Value':r.get('magnetic_z_nT'),'Unit':'nT'},{'Component':'Horizontal field H','Value':r.get('magnetic_horizontal_field_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
+    r=project['reference_data']; st.dataframe(pd.DataFrame([{'Quantity':'Declination','Value':r.get('magnetic_declination_deg'),'Unit':'deg'},{'Quantity':'Dip','Value':r.get('magnetic_dip_deg'),'Unit':'deg'},{'Quantity':'Total field','Value':r.get('magnetic_total_field_nT'),'Unit':'nT'},{'Quantity':'Horizontal field','Value':r.get('magnetic_horizontal_field_nT'),'Unit':'nT'},{'Quantity':'X','Value':r.get('magnetic_x_nT'),'Unit':'nT'},{'Quantity':'Y','Value':r.get('magnetic_y_nT'),'Unit':'nT'},{'Quantity':'Z','Value':r.get('magnetic_z_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
     st.markdown('### North-reference converter'); a,b,c,d=st.columns(4); az=a.number_input('Azimuth (°)',0.,360.,0.); fr=b.selectbox('From',['Magnetic','True','Grid']); to=c.selectbox('To',['Magnetic','True','Grid']);
     if d.button('Convert'):
         dec=float(r.get('magnetic_declination_deg') or 0); conv=float(r.get('grid_convergence_deg') or 0); out=az if fr==to else magnetic_to_true(az,dec) if (fr,to)==('Magnetic','True') else true_to_magnetic(az,dec) if (fr,to)==('True','Magnetic') else true_to_grid(az,conv) if (fr,to)==('True','Grid') else grid_to_true(az,conv) if (fr,to)==('Grid','True') else magnetic_to_grid(az,dec,conv) if (fr,to)==('Magnetic','Grid') else grid_to_magnetic(az,dec,conv); st.metric(f'{to} azimuth',f'{out:.4f}°')
@@ -401,42 +374,38 @@ elif page=='BHA & Drilling':
 elif page=='Visualization':
     page_header('Integrated Well Visualization', 'OUTPUTS', 'Inspect the planned well, targets, offsets and screening uncertainty in plan, vertical-section and 3D views.')
     main=pd.DataFrame(project.get('surveys',[]));
-    required_cols={'Easting','Northing','TVD','VS','MD'}
-    if main.empty or not required_cols.issubset(main.columns):
-        st.info('No calculated trajectory is available yet. Import surveys or create and calculate a trajectory in **Survey Manager** / **Trajectory Planner**. Visualization will populate automatically once trajectory coordinates exist.')
-        st.markdown('**Current state:** no plot generated — this is an expected setup state, not an application error.')
+    if main.empty: st.warning('No main-well trajectory.'); st.stop()
+    view=st.selectbox('View',['Plan','Vertical Section','3D']); show_unc=st.checkbox('Show screening uncertainty',True); show_targets=st.checkbox('Show targets',True); show_offsets=st.checkbox('Show offsets',True)
+    fig=go.Figure()
+    if view=='Plan':
+        fig.add_trace(go.Scatter(x=main['Easting'],y=main['Northing'],mode='lines+markers',name=project['well_name'],text=[f"MD {x:.0f} m" for x in main['MD']],hovertemplate='%{text}<extra></extra>'))
+        if show_offsets:
+            for off in project.get('offsets',[]):
+                od=pd.DataFrame(off.get('surveys',[]));
+                if {'Easting','Northing'}.issubset(od.columns): fig.add_trace(go.Scatter(x=od.Easting,y=od.Northing,mode='lines',name=off.get('name','Offset')))
+        if show_targets:
+            for t in project.get('targets',[]):
+                n,e=target_boundary(t); fig.add_trace(go.Scatter(x=e,y=n,mode='lines+markers',name=t.get('name','Target'),line=dict(dash='dash')))
+        if show_unc:
+            sig=float(project['survey_metadata'].get('positional_sigma_m',0) or 0)
+            if sig>0:
+                a=np.linspace(0,2*np.pi,72); x=float(main.iloc[-1].Easting)+sig*np.cos(a); y=float(main.iloc[-1].Northing)+sig*np.sin(a); fig.add_trace(go.Scatter(x=x,y=y,mode='lines',name='Screening uncertainty'))
+        fig.update_layout(xaxis_title='Easting (m)',yaxis_title='Northing (m)',height=700)
+    elif view=='Vertical Section':
+        fig.add_trace(go.Scatter(x=main['VS'],y=main['TVD'],mode='lines+markers',name=project['well_name'])); fig.update_yaxes(autorange='reversed'); fig.update_layout(xaxis_title='Vertical Section (m)',yaxis_title='TVD (m)',height=700)
     else:
-        view=st.selectbox('View',['Plan','Vertical Section','3D']); show_unc=st.checkbox('Show screening uncertainty',True); show_targets=st.checkbox('Show targets',True); show_offsets=st.checkbox('Show offsets',True)
-        fig=go.Figure()
-        if view=='Plan':
-            fig.add_trace(go.Scatter(x=main['Easting'],y=main['Northing'],mode='lines+markers',name=project['well_name'],text=[f"MD {x:.0f} m" for x in main['MD']],hovertemplate='%{text}<extra></extra>'))
-            if show_offsets:
-                for off in project.get('offsets',[]):
-                    od=pd.DataFrame(off.get('surveys',[]));
-                    if {'Easting','Northing'}.issubset(od.columns): fig.add_trace(go.Scatter(x=od.Easting,y=od.Northing,mode='lines',name=off.get('name','Offset')))
-            if show_targets:
-                for t in project.get('targets',[]):
-                    n,e=target_boundary(t); fig.add_trace(go.Scatter(x=e,y=n,mode='lines+markers',name=t.get('name','Target'),line=dict(dash='dash')))
-            if show_unc:
-                sig=float(project['survey_metadata'].get('positional_sigma_m',0) or 0)
-                if sig>0:
-                    a=np.linspace(0,2*np.pi,72); x=float(main.iloc[-1].Easting)+sig*np.cos(a); y=float(main.iloc[-1].Northing)+sig*np.sin(a); fig.add_trace(go.Scatter(x=x,y=y,mode='lines',name='Screening uncertainty'))
-            fig.update_layout(xaxis_title='Easting (m)',yaxis_title='Northing (m)',height=700)
-        elif view=='Vertical Section':
-            fig.add_trace(go.Scatter(x=main['VS'],y=main['TVD'],mode='lines+markers',name=project['well_name'])); fig.update_yaxes(autorange='reversed'); fig.update_layout(xaxis_title='Vertical Section (m)',yaxis_title='TVD (m)',height=700)
-        else:
-            fig.add_trace(go.Scatter3d(x=main.Easting,y=main.Northing,z=-main.TVD,mode='lines+markers',name=project['well_name'],text=[f'MD {x:.0f} m' for x in main.MD],hovertemplate='%{text}<extra></extra>'))
-            fig.add_trace(go.Scatter3d(x=[main.iloc[0].Easting],y=[main.iloc[0].Northing],z=[-main.iloc[0].TVD],mode='text',text=['WH'],name='Wellhead',showlegend=False))
-            fig.add_trace(go.Scatter3d(x=[main.iloc[-1].Easting],y=[main.iloc[-1].Northing],z=[-main.iloc[-1].TVD],mode='text',text=['TD'],name='TD',showlegend=False))
-            if show_offsets:
-                for off in project.get('offsets',[]):
-                    od=pd.DataFrame(off.get('surveys',[]));
-                    if {'Easting','Northing','TVD'}.issubset(od.columns): fig.add_trace(go.Scatter3d(x=od.Easting,y=od.Northing,z=-od.TVD,mode='lines',name=off.get('name','Offset')))
-            if show_targets:
-                for t in project.get('targets',[]):
-                    tn=float(t.get('north_m',0)); te=float(t.get('east_m',0)); tz=-float(t.get('tvdss_m',0)); fig.add_trace(go.Scatter3d(x=[te],y=[tn],z=[tz],mode='markers+text',text=[t.get('name','Target')],textposition='top center',name=t.get('name','Target'),showlegend=False))
-            fig.update_layout(scene=dict(xaxis_title='Easting',yaxis_title='Northing',zaxis_title='-TVD'),height=750)
-        st.plotly_chart(fig,use_container_width=True)
+        fig.add_trace(go.Scatter3d(x=main.Easting,y=main.Northing,z=-main.TVD,mode='lines+markers',name=project['well_name'],text=[f'MD {x:.0f} m' for x in main.MD],hovertemplate='%{text}<extra></extra>'))
+        fig.add_trace(go.Scatter3d(x=[main.iloc[0].Easting],y=[main.iloc[0].Northing],z=[-main.iloc[0].TVD],mode='text',text=['WH'],name='Wellhead',showlegend=False))
+        fig.add_trace(go.Scatter3d(x=[main.iloc[-1].Easting],y=[main.iloc[-1].Northing],z=[-main.iloc[-1].TVD],mode='text',text=['TD'],name='TD',showlegend=False))
+        if show_offsets:
+            for off in project.get('offsets',[]):
+                od=pd.DataFrame(off.get('surveys',[]));
+                if {'Easting','Northing','TVD'}.issubset(od.columns): fig.add_trace(go.Scatter3d(x=od.Easting,y=od.Northing,z=-od.TVD,mode='lines',name=off.get('name','Offset')))
+        if show_targets:
+            for t in project.get('targets',[]):
+                tn=float(t.get('north_m',0)); te=float(t.get('east_m',0)); tz=-float(t.get('tvdss_m',0)); fig.add_trace(go.Scatter3d(x=[te],y=[tn],z=[tz],mode='markers+text',text=[t.get('name','Target')],textposition='top center',name=t.get('name','Target'),showlegend=False))
+        fig.update_layout(scene=dict(xaxis_title='Easting',yaxis_title='Northing',zaxis_title='-TVD'),height=750)
+    st.plotly_chart(fig,use_container_width=True)
 
 # QA/QC
 elif page=='QA/QC':
@@ -448,16 +417,16 @@ elif page=='QA/QC':
 # Reports
 elif page=='Reports':
     page_header('Engineering Practice Report', 'OUTPUTS', 'Export the shared project state and QA/QC results as a reproducible practice record.')
-    report={'platform':'Well Planning Platform','version':'5.1','generated_utc':datetime.utcnow().isoformat()+'Z','project':project_to_json(project),'qa_qc':validate_project(project)}
+    report={'platform':'Well Planning Platform','version':'5.0','generated_utc':datetime.utcnow().isoformat()+'Z','project':project_to_json(project),'qa_qc':validate_project(project)}
     st.json({'platform':report['platform'],'version':report['version'],'well':project['well_name'],'qa_checks':len(report['qa_qc'])})
     st.download_button('Download full project report JSON',json.dumps(report,indent=2).encode(),file_name=f"{project['well_name']}_v4_report.json",mime='application/json')
     st.download_button('Download survey CSV',pd.DataFrame(project.get('surveys',[])).to_csv(index=False).encode(),file_name=f"{project['well_name']}_survey.csv",mime='text/csv')
 
 # About
 else:
-    page_header('About v5.1', 'SYSTEM', 'Release notes, engineering scope and the distinction between practice screening and validated operational software.')
+    page_header('About v5.0', 'SYSTEM', 'Release notes, engineering scope and the distinction between practice screening and validated operational software.')
     st.markdown('''
-## v5.1 Workflow & Engineering UX release
+## v5.0 UI / UX release
 
 Well Planning Platform is a browser-first, project-independent workspace for learning and practicing drilling engineering and well planning.
 
