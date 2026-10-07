@@ -14,6 +14,11 @@ def clearance_report(main_df, offsets, sigma_main=0.0, sigma_offset=0.0):
         odf = pd.DataFrame(off.get("surveys", []))
         if not {"MD","Easting","Northing","TVD"}.issubset(odf.columns):
             continue
+        # Offset trajectories are stored in an offset-well local frame; translate them
+        # into the main-well frame using the stored surface offsets.
+        odf = odf.copy()
+        odf['Easting'] = odf['Easting'].astype(float) + float(off.get('surface_easting_m', 0.0))
+        odf['Northing'] = odf['Northing'].astype(float) + float(off.get('surface_northing_m', 0.0))
         lo=max(float(main_df.MD.min()), float(odf.MD.min())); hi=min(float(main_df.MD.max()), float(odf.MD.max()))
         if hi <= lo: continue
         grid=np.linspace(lo,hi, max(25, int((hi-lo)/30)+1))
