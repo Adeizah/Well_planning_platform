@@ -80,7 +80,17 @@ def igrf14(lat, lon, altitude_m, calc_date):
     d = _as_date(calc_date)
     calc_dt = datetime.combine(d, time.min)
     Be, Bn, Bu = ppigrf.igrf(float(lon), float(lat), float(altitude_m) / 1000.0, calc_dt)
-    X = float(Be * 0 + Bn); Y = float(Be); Z = float(-Bu)
+    # ppigrf returns 1-element NumPy arrays even for scalar coordinates.
+    # Extract the single value before using Python math/scalar conversion.
+    def _scalar(value, name):
+        arr = __import__('numpy').asarray(value)
+        if arr.size != 1:
+            raise ValueError(f'IGRF returned unexpected {name} shape {arr.shape}; expected one value.')
+        return float(arr.reshape(-1)[0])
+    Be = _scalar(Be, 'east component')
+    Bn = _scalar(Bn, 'north component')
+    Bu = _scalar(Bu, 'up component')
+    X = Bn; Y = Be; Z = -Bu
     H = math.hypot(X, Y)
     F = math.hypot(H, Z)
     D = math.degrees(math.atan2(Y, X))
