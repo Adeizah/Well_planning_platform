@@ -115,8 +115,11 @@ with st.sidebar:
     st.markdown('**Workspace**')
     current_label = f"{NAV_PREFIX.get(st.session_state.active_page, '01')} • {st.session_state.active_page}"
     labels = [f"{NAV_PREFIX[x]} • {x}" for x in NAV_OPTIONS]
-    try: current_index = labels.index(current_label)
-    except ValueError: current_index = 0
+    current_index = 0
+    for i, label in enumerate(labels):
+        if label == current_label:
+            current_index = i
+            break
     selected_label = st.selectbox('Module', labels, index=current_index, label_visibility='collapsed')
     selected_page = selected_label.split(' • ', 1)[1]
     st.session_state.active_page = selected_page
@@ -186,11 +189,14 @@ st.markdown(
 
 # Dashboard
 def safe_index(options, value, default=0):
-    """Return a valid selectbox index without crashing on legacy/imported values."""
+    """Return a valid selectbox index without ever calling list.index()."""
     try:
-        return options.index(value)
-    except (ValueError, TypeError):
-        return default
+        for i, option in enumerate(options):
+            if option == value:
+                return i
+    except Exception:
+        pass
+    return max(0, min(int(default), len(options) - 1)) if options else 0
 
 
 if page=='Dashboard':
