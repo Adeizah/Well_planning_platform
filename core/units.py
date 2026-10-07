@@ -17,6 +17,16 @@ def dls_for_interval_to_100ft(value, interval_m):
     if float(interval_m) <= 0: raise ValueError('DLS interval must be positive.')
     return float(value) * (30.48 / float(interval_m))
 
+# Backward-compatible names used by older app revisions. These refer to DLS
+# interval conversion, not ordinary length conversion.
+def dls_m_to_ft(value):
+    """Deprecated alias for DLS conversion from deg/30 m to deg/100 ft."""
+    return dls_30m_to_100ft(value)
+
+def dls_ft_to_m(value):
+    """Deprecated alias for DLS conversion from deg/100 ft to deg/30 m."""
+    return dls_100ft_to_30m(value)
+
 def length_label(unit='Field'): return 'ft' if unit == 'Field' else 'm'
 def depth_value_m(value_m, unit='Field'): return m_to_ft(value_m) if unit == 'Field' else float(value_m)
 def depth_value_ft(value_ft, unit='Field'): return ft_to_m(value_ft) if unit == 'Field' else float(value_ft)
