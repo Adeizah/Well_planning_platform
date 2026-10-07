@@ -164,6 +164,14 @@ st.markdown(
 )
 
 # Dashboard
+def safe_index(options, value, default=0):
+    """Return a valid selectbox index without crashing on legacy/imported values."""
+    try:
+        return options.index(value)
+    except (ValueError, TypeError):
+        return default
+
+
 if page=='Dashboard':
     page_header('Well Planning Dashboard', 'HOME', 'Single-screen project overview. All values below are read from the shared project model used by the engineering modules.')
     surveys = project.get('surveys', []); targets = project.get('targets', []); offsets = project.get('offsets', []); casing = project.get('casing_program', [])
@@ -215,8 +223,8 @@ elif page=='Project & Reference':
     a,b,c,d=st.columns(4)
     project['field']=a.text_input('Field / Asset',project.get('field',''))
     project['site_pad']=b.text_input('Site / Pad',project.get('site_pad',''))
-    project['well_purpose']=c.selectbox('Well purpose',['Exploration','Appraisal','Development','Injection','Sidetrack','Other'],index=['Exploration','Appraisal','Development','Injection','Sidetrack','Other'].index(project.get('well_purpose','Development')))
-    project['well_design']=d.selectbox('Well design',['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'],index=['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'].index(project.get('well_design','Build & Hold')))
+    purpose_options=['Exploration','Appraisal','Development','Injection','Sidetrack','Other']; project['well_purpose']=c.selectbox('Well purpose',purpose_options,index=safe_index(purpose_options,project.get('well_purpose','Development'),2))
+    design_options=['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom']; project['well_design']=d.selectbox('Well design',design_options,index=safe_index(design_options,project.get('well_design','Build & Hold'),3))
 
     st.markdown('### Location & coordinate system')
     a,b,c=st.columns(3); project['latitude']=a.number_input('Latitude (°)',-90.,90.,float(project['latitude']),format='%.6f'); project['longitude']=b.number_input('Longitude (°)',-180.,180.,float(project['longitude']),format='%.6f'); project['elevation_m']=c.number_input('Wellhead elevation (ft)',-6500.,33000.,float(project['elevation_m'])*3.280839895) / 3.280839895
@@ -245,7 +253,7 @@ elif page=='Project & Reference':
         if ci.get('type') == 'Projected':
             st.info(f"Wellhead projected position: Easting {project.get('surface_easting_m',0):,.3f} m ({project.get('surface_easting_m',0)*M_TO_FT:,.2f} ft) • Northing {project.get('surface_northing_m',0):,.3f} m ({project.get('surface_northing_m',0)*M_TO_FT:,.2f} ft)")
     except Exception as e: st.error(f'CRS/reference calculation error: {e}')
-    a,b,c=st.columns(3); project['north_reference']=a.selectbox('Primary north reference',['True North','Grid North','Magnetic North'],index=['True North','Grid North','Magnetic North'].index(project.get('north_reference','Grid North'))); project['depth_reference']=b.selectbox('Depth reference',['MD / TVDSS','MD / TVD']); project['status']=c.selectbox('Project status',['Planning','Draft','Under Review','Approved for Training'],index=['Planning','Draft','Under Review','Approved for Training'].index(project.get('status','Planning')))
+    a,b,c=st.columns(3); north_options=['True North','Grid North','Magnetic North']; project['north_reference']=a.selectbox('Primary north reference',north_options,index=safe_index(north_options,project.get('north_reference','Grid North'),1)); project['depth_reference']=b.selectbox('Depth reference',['MD / TVDSS','MD / TVD']); status_options=['Planning','Draft','Under Review','Approved for Training']; project['status']=c.selectbox('Project status',status_options,index=safe_index(status_options,project.get('status','Planning'),0))
     st.markdown('### Design constraints')
     dc=project['design_constraints']; a,b,c=st.columns(3); dc['max_dls_deg_30m']=dls_100ft_to_30m(a.number_input('Max DLS (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_dls_deg_30m'])))); dc['max_inclination_deg']=b.number_input('Max inclination (°)',0.,180.,float(dc['max_inclination_deg'])); dc['max_build_rate_deg_30m']=dls_100ft_to_30m(c.number_input('Max build rate (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_build_rate_deg_30m']))))
     if st.button('Save project/reference settings',type='primary'): save(); st.success('Saved.')
@@ -255,7 +263,7 @@ elif page=='Survey Manager':
     page_header('Survey Manager', 'DIRECTIONAL', 'Load, normalize and calculate survey trajectories while preserving the selected azimuth reference and uncertainty assumptions.')
     sm=project['survey_metadata']; ref=project['reference_data']
     req=reference_requirements(project.get('north_reference','Grid North')); st.info(f"**Primary reference: {req['reference']}** — {req['label']}")
-    a,b,c,d=st.columns(4); sm['azimuth_reference']=a.selectbox('Input azimuth reference',['Magnetic North','True North','Grid North'],index=['Magnetic North','True North','Grid North'].index(sm['azimuth_reference'])); sm['survey_tool']=b.selectbox('Survey tool',['MWD','Gyro','Wireline','Planned','Other']); sm['survey_method']=c.selectbox('Calculation method',['Minimum Curvature','Average Angle','Balanced Tangential']); sm['positional_sigma_m']=d.number_input('Screening sigma (ft)',0.,1640.,float(sm.get('positional_sigma_m',0))*M_TO_FT)/M_TO_FT
+    a,b,c,d=st.columns(4); azimuth_options=['Magnetic North','True North','Grid North']; sm['azimuth_reference']=a.selectbox('Input azimuth reference',azimuth_options,index=safe_index(azimuth_options,sm.get('azimuth_reference','Grid North'),2)); sm['survey_tool']=b.selectbox('Survey tool',['MWD','Gyro','Wireline','Planned','Other']); sm['survey_method']=c.selectbox('Calculation method',['Minimum Curvature','Average Angle','Balanced Tangential']); sm['positional_sigma_m']=d.number_input('Screening sigma (ft)',0.,1640.,float(sm.get('positional_sigma_m',0))*M_TO_FT)/M_TO_FT
     st.caption('Screening uncertainty only. Full ISCWSA covariance/tool-error models remain an engineering-validation task.')
     df=pd.DataFrame(project.get('surveys',[])); display_df=(df.copy() if not df.empty else pd.DataFrame([{'MD':0.,'Inc':0.,'Azi':0.}]))
     if 'MD' in display_df.columns: display_df['MD']=display_df['MD']*M_TO_FT
