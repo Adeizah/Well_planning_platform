@@ -1,165 +1,564 @@
-from datetime import date
-import copy
+"""
+core/project.py
+Standalone project/state persistence helpers for the well-planning workflow.
 
-SCHEMA_VERSION='4.0'
-PROJECT_FILE_FORMAT='well-planning-project'
-PROJECT_FILE_VERSION=1
+Engineering-facing values in this module use field units:
+    length: ft
+    pressure: psi
+    density: ppg
+    flow: gpm
+    angle: deg
+    DLS: deg/100ft
 
-def new_project():
-    return {'schema_version':SCHEMA_VERSION,'project_name':'New Well Planning Project','well_name':'NEW-01','operator':'','field':'','site_pad':'','well_number':'NEW-01','well_purpose':'Development','well_design':'Build & Hold','status':'Planning','well_type':'Development Producer','latitude':4.8,'longitude':6.9,'surface_easting_m':0.0,'surface_northing_m':0.0,'elevation_m':25.0,'kb_m':25.0,'crs':'EPSG:4326','planned_date':str(date.today()),'north_reference':'Grid North','depth_reference':'MD / TVDSS','units':'Field','notes':'','design_constraints':{'max_dls_deg_30m':3.0,'max_inclination_deg':70.0,'max_build_rate_deg_30m':3.0,'max_turn_rate_deg_30m':3.0},'surveys':[{'MD':0.0,'Inc':0.0,'Azi':0.0}], 'survey_metadata':{'azimuth_reference':'Grid North','survey_tool':'MWD','survey_method':'Minimum Curvature','positional_sigma_m':0.0,'uncertainty_model':'Screening radial uncertainty'},'targets':[],'offsets':[],'model_metadata':{},'trajectory_metadata':{},'reference_data':{'grid_convergence_deg':None,'magnetic_declination_deg':None,'magnetic_dip_deg':None,'magnetic_total_field_nT':None,'magnetic_horizontal_field_nT':None,'magnetic_x_nT':None,'magnetic_y_nT':None,'magnetic_z_nT':None,'gravity_mps2':None,'geoid_height_m':None,'geoid_model':None,'source_crs':'EPSG:4326','project_crs':'EPSG:4326','datum':None,'ellipsoid':None},'well_architecture':{'planned_td_md_m':None,'planned_td_tvd_m':None,'kop_md_m':None,'trajectory_type':'Build & Hold'},'casing_program':[],'geology':[],'bha':[],'engineering_assumptions':{}}
+This module intentionally keeps the project record JSON-friendly so it can be
+saved/exported and imported without a database.
 
-def project_to_json(project):
-    out = copy.deepcopy(project)
-    # File metadata is deliberately separate from the engineering schema version.
-    # This lets the project file format evolve without breaking the engineering model.
-    out['_file_format'] = PROJECT_FILE_FORMAT
-    out['_file_version'] = PROJECT_FILE_VERSION
-    return out
+The importer accepts the current field-unit workflow format, including:
+    project
+    reference
+    well_architecture
+    targets
+    offsets
+    surveys
+    trajectory
+    geomagnetics
+    etc.
 
-def _deep_merge(base,incoming):
-    for k,v in incoming.items():
-        if isinstance(v,dict) and isinstance(base.get(k),dict): _deep_merge(base[k],v)
-        else: base[k]=v
+Offset records are normalized so latitude/longitude and the surface offset
+from the main well are retained.
+"""
 
-def _workflow_record_to_project(data):
-    """Convert the human-readable field-unit workflow record into the app's internal schema."""
-    FT_TO_M = 0.3048
-    proj = new_project()
-    meta = data.get('project', {})
-    loc = data.get('surface_location', {})
-    vr = data.get('vertical_reference', {})
-    sm = data.get('survey_manager', {})
-    ref = data.get('reference_and_geomagnetics', {})
-    wa = data.get('well_architecture', {})
-    tp = data.get('trajectory_planning', {})
+from __future__ import annotations
 
-    for k in ['project_name','well_name','well_number','operator','field','site_pad','well_purpose','well_design','status','well_type']:
-        if k in meta: proj[k] = meta[k]
-    proj['latitude'] = float(loc.get('latitude_deg', proj['latitude']))
-    proj['longitude'] = float(loc.get('longitude_deg', proj['longitude']))
-    proj['crs'] = loc.get('crs', proj['crs'])
-    proj['surface_easting_m'] = float(loc.get('surface_easting_ft', 0))*FT_TO_M
-    proj['surface_northing_m'] = float(loc.get('surface_northing_ft', 0))*FT_TO_M
-    proj['elevation_m'] = float(loc.get('elevation_ft_msl', 0))*FT_TO_M
-    proj['kb_m'] = float(loc.get('kb_elevation_ft_msl', 0))*FT_TO_M
-    proj['north_reference'] = ref.get('selected_north_reference', 'Grid North')
-    proj['depth_reference'] = vr.get('depth_reference', 'MD / TVDSS')
+from copy import deepcopy
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-    stations = sm.get('stations', [])
-    proj['surveys'] = [{'MD': float(x[0])*FT_TO_M, 'Inc': float(x[1]), 'Azi': float(x[2])} for x in stations]
-    if not proj['surveys']:
-        proj['surveys'] = [{'MD':0.0,'Inc':0.0,'Azi':0.0}]
-    proj['survey_metadata'] = {
-        'azimuth_reference': sm.get('azimuth_reference', proj['north_reference']),
-        'survey_tool': sm.get('survey_tool','MWD'),
-        'survey_method': sm.get('calculation_method','Minimum Curvature'),
-        'positional_sigma_m': 0.0,
-        'uncertainty_model': 'Screening radial uncertainty'
+
+SCHEMA_VERSION = "1.5"
+PROJECT_NAME = "Well Planning Project"
+
+
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _copy(value: Any) -> Any:
+    return deepcopy(value)
+
+
+# ---------------------------------------------------------------------------
+# Default project
+# ---------------------------------------------------------------------------
+
+def default_project() -> Dict[str, Any]:
+    """Return a clean, JSON-serializable project record."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "project": {
+            "name": "",
+            "field": "",
+            "well_name": "",
+            "pad": "",
+            "operator": "",
+            "country": "",
+            "well_purpose": "Development",
+            "well_type": "Development",
+            "design": "",
+            "status": "Planning",
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+        },
+        "reference": {
+            "crs": {
+                "epsg": None,
+                "name": "",
+                "latitude_deg": None,
+                "longitude_deg": None,
+                "coordinate_order": "Easting, Northing",
+            },
+            "surface": {
+                "latitude_deg": None,
+                "longitude_deg": None,
+                "northing_ft": None,
+                "easting_ft": None,
+                "ground_elevation_ft_msl": None,
+                "wellhead_elevation_ft_msl": None,
+                "kb_elevation_ft_msl": None,
+                "kb_to_ground_ft": None,
+                "tvd_reference": "KB/RKB",
+                "tvdss_reference": "MSL",
+                "north_reference": "Grid North",
+                "declination_deg": None,
+                "grid_convergence_deg": None,
+            },
+        },
+        "well_architecture": {
+            "planned_md_ft": None,
+            "planned_tvd_ft": None,
+            "kop_ft": None,
+            "casing": [],
+        },
+        "targets": [],
+        "offsets": [],
+        "surveys": [],
+        "trajectory": {
+            "method": "Minimum Curvature",
+            "stations": [],
+        },
+        "geomagnetics": {
+            "model": "WMM2025",
+            "date": None,
+            "latitude_deg": None,
+            "longitude_deg": None,
+            "ellipsoid_height_ft": None,
+            "declination_deg": None,
+            "dip_deg": None,
+            "total_field_nt": None,
+            "horizontal_field_nt": None,
+            "north_component_nt": None,
+            "east_component_nt": None,
+            "vertical_component_nt": None,
+        },
+        "geodesy": {
+            "grid_convergence_deg": None,
+            "normal_gravity_m_s2": None,
+            "geoid_model": "",
+            "geoid_separation_ft": None,
+        },
+        "anti_collision": {
+            "enabled": True,
+            "method": "Screening",
+            "separation_factor": None,
+        },
+        "casing_design": [],
+        "hydraulics": {},
+        "pp_fg": {},
+        "torque_drag": {},
+        "cementing": {},
+        "well_control": {},
+        "bha": {},
+        "visualization": {},
+        "qa_qc": {},
+        "reports": {},
+        "ui": {
+            "active_page": "01 Dashboard",
+        },
     }
-    interval_ft = float(sm.get('dls_interval_ft',100))
-    proj['trajectory_metadata'] = {'dls_interval_m': interval_ft*FT_TO_M, 'dls_interval_ft': interval_ft}
 
-    proj['reference_data'].update({
-        k: data.get('reference_and_geomagnetics',{}).get(k)
-        for k in ['grid_convergence_deg','magnetic_declination_deg','magnetic_dip_deg','magnetic_total_field_nT','magnetic_horizontal_field_nT','magnetic_x_nT','magnetic_y_nT','magnetic_z_nT']
-        if data.get('reference_and_geomagnetics',{}).get(k) is not None
-    })
-    proj['reference_data']['source_crs'] = loc.get('crs', 'EPSG:4326')
-    proj['reference_data']['project_crs'] = loc.get('crs', 'EPSG:4326')
 
-    target = data.get('target_a')
-    if target:
-        ell = target.get('ellipse', {})
-        t = {'name': target.get('name','Target A'), 'type':'Elliptical',
-             'north_m': float(target.get('north_ft',0))*FT_TO_M,
-             'east_m': float(target.get('east_ft',0))*FT_TO_M,
-             'tvdss_m': float(target.get('tvdss_ft',0))*FT_TO_M}
-        t['semi_major_m'] = float(ell.get('semi_major_ft',0))*FT_TO_M
-        t['semi_minor_m'] = float(ell.get('semi_minor_ft',0))*FT_TO_M
-        t['orientation_deg'] = float(ell.get('orientation_deg',0))
-        proj['targets'] = [t]
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
 
-    proj['well_architecture'] = {
-        'planned_td_md_m': float(wa.get('planned_td_md_ft'))*FT_TO_M if wa.get('planned_td_md_ft') is not None else None,
-        'planned_td_tvd_m': float(wa.get('planned_td_tvd_ft'))*FT_TO_M if wa.get('planned_td_tvd_ft') is not None else None,
-        'kop_md_m': float(wa.get('kop_md_ft'))*FT_TO_M if wa.get('kop_md_ft') is not None else None,
-        'trajectory_type': wa.get('trajectory_type', tp.get('profile','Build & Hold'))
+def _normalize_project(project: Mapping[str, Any]) -> Dict[str, Any]:
+    p = dict(project)
+    purpose = str(p.get("well_purpose", p.get("purpose", "Development")))
+    allowed = {
+        "Exploration", "Appraisal", "Development", "Injection",
+        "Sidetrack", "Other"
     }
-    casing=[]
-    for c in wa.get('casing_program',[]):
-        casing.append({
-            'string_no': c.get('string_no'), 'type': c.get('type'), 'hole_size_in': c.get('hole_size_in'),
-            'casing_od_in': c.get('casing_od_in'), 'grade': c.get('grade'), 'weight_lbft': c.get('weight_lbft'),
-            'depth_type': c.get('depth_type','MD'),
-            'shoe_md_m': float(c.get('shoe_md_ft',0))*FT_TO_M,
-            'shoe_tvd_m': float(c.get('shoe_tvd_ft',0))*FT_TO_M,
-            'shoe_tvdss_m': float(c.get('shoe_tvdss_ft',0))*FT_TO_M,
-            'top_md_m': float(c.get('top_md_ft',0))*FT_TO_M,
-            'liner_top_m': float(c['liner_top_ft'])*FT_TO_M if c.get('liner_top_ft') is not None else None
-        })
-    proj['casing_program'] = casing
-
-    offsets=[]
-    raw_offsets = data.get('offsets') or data.get('offset_wells') or []
-    for ow in raw_offsets:
-        lat = ow.get('latitude', ow.get('latitude_deg'))
-        lon = ow.get('longitude', ow.get('longitude_deg'))
-        e_ft = ow.get('surface_easting_ft')
-        n_ft = ow.get('surface_northing_ft')
-        item = {
-            'name': ow.get('name','Offset'),
-            'azimuth_reference': ow.get('azimuth_reference','Grid North'),
-            'surveys':[{'MD':float(x[0])*FT_TO_M,'Inc':float(x[1]),'Azi':float(x[2])} for x in ow.get('surveys',[])]
-        }
-        if lat is not None: item['latitude'] = float(lat)
-        if lon is not None: item['longitude'] = float(lon)
-        if e_ft is not None: item['surface_easting_m'] = float(e_ft) * FT_TO_M
-        if n_ft is not None: item['surface_northing_m'] = float(n_ft) * FT_TO_M
-        offsets.append(item)
-    proj['offsets'] = offsets
-    proj['model_metadata'] = {'geomagnetic_models': ref.get('geomagnetic_models',[]), 'preferred_magnetic_quantity': ref.get('preferred_magnetic_quantity')}
-    return proj
-
-def project_from_json(data):
-    if not isinstance(data, dict):
-        raise ValueError('Invalid project file: the JSON root must be an object.')
-    # Accept both native project exports and the field-unit workflow record we created for this training case.
-    if data.get('record_type') == 'well_planning_workflow_record':
-        return _workflow_record_to_project(data)
-    fmt = data.get('_file_format')
-    ver = data.get('_file_version')
-    if fmt is not None and fmt != PROJECT_FILE_FORMAT:
-        raise ValueError('Invalid project file: this JSON was not exported by the Well Planning Platform.')
-    if ver is not None:
-        try: ver = int(ver)
-        except Exception: raise ValueError('Invalid project file: unsupported file-version value.')
-        if ver > PROJECT_FILE_VERSION:
-            raise ValueError(f'Project file version {ver} is newer than this platform supports (v{PROJECT_FILE_VERSION}).')
-    p=new_project()
-    clean={k:v for k,v in data.items() if not k.startswith('_')}
-    _deep_merge(p,clean)
-    p['schema_version']=SCHEMA_VERSION
+    if purpose not in allowed:
+        # Compatibility with records that used "Production".
+        if purpose.lower() == "production":
+            purpose = "Development"
+        else:
+            purpose = "Other"
+    p["well_purpose"] = purpose
+    p["updated_at"] = _now_iso()
     return p
 
-def validate_project(p):
-    checks=[]
-    checks.append({'check':'Project identity','status':'PASS' if p.get('project_name') and p.get('well_name') else 'FAIL','message':'Project and well names are defined.'})
-    try: lat_ok=-90<=float(p.get('latitude'))<=90; lon_ok=-180<=float(p.get('longitude'))<=180
-    except: lat_ok=lon_ok=False
-    checks.append({'check':'Surface coordinates','status':'PASS' if lat_ok and lon_ok else 'FAIL','message':'Latitude and longitude are valid.' if lat_ok and lon_ok else 'Invalid latitude/longitude.'})
+
+def _normalize_surface(reference: Mapping[str, Any]) -> Dict[str, Any]:
+    ref = deepcopy(dict(reference or {}))
+    surface = deepcopy(ref.get("surface", {}))
+
+    # Accept common aliases used by older workflow records.
+    if surface.get("latitude_deg") is None:
+        surface["latitude_deg"] = _float(
+            surface.get("latitude", ref.get("latitude_deg"))
+        )
+    if surface.get("longitude_deg") is None:
+        surface["longitude_deg"] = _float(
+            surface.get("longitude", ref.get("longitude_deg"))
+        )
+
+    for key in (
+        "northing_ft", "easting_ft",
+        "ground_elevation_ft_msl",
+        "wellhead_elevation_ft_msl",
+        "kb_elevation_ft_msl",
+        "kb_to_ground_ft",
+        "declination_deg",
+        "grid_convergence_deg",
+    ):
+        surface[key] = _float(surface.get(key))
+
+    ref["surface"] = surface
+    return ref
+
+
+def normalize_offset(offset: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize one offset well.
+
+    The important fields are deliberately kept in field units:
+      latitude, longitude
+      surface_northing_relative_ft
+      surface_easting_relative_ft
+      surface_northing_ft
+      surface_easting_ft
+    """
+    src = deepcopy(dict(offset or {}))
+
+    name = (
+        src.get("name")
+        or src.get("well_name")
+        or src.get("offset_name")
+        or "Offset"
+    )
+
+    lat = _float(src.get("latitude", src.get("latitude_deg")))
+    lon = _float(src.get("longitude", src.get("longitude_deg")))
+
+    rn = _float(
+        src.get(
+            "surface_northing_relative_ft",
+            src.get("relative_northing_ft", src.get("northing_relative_ft")),
+        ),
+        0.0,
+    )
+    re = _float(
+        src.get(
+            "surface_easting_relative_ft",
+            src.get("relative_easting_ft", src.get("easting_relative_ft")),
+        ),
+        0.0,
+    )
+
+    sn = _float(src.get("surface_northing_ft"))
+    se = _float(src.get("surface_easting_ft"))
+
+    surveys = src.get("surveys")
+    if not isinstance(surveys, list):
+        surveys = []
+
+    result = {
+        "name": name,
+        "latitude": lat,
+        "longitude": lon,
+        "surface_northing_relative_ft": rn,
+        "surface_easting_relative_ft": re,
+        "surface_northing_ft": sn,
+        "surface_easting_ft": se,
+        "azimuth_reference": src.get(
+            "azimuth_reference",
+            src.get("north_reference", "Grid North"),
+        ),
+        "surveys": surveys,
+    }
+
+    # Preserve any extra user-defined offset fields.
+    for key, value in src.items():
+        if key not in result:
+            result[key] = value
+
+    return result
+
+
+def normalize_offsets(data: Any) -> List[Dict[str, Any]]:
+    """Normalize the supported offset container formats."""
+    if data is None:
+        return []
+
+    if isinstance(data, Mapping):
+        # Accept {"OW-01": {...}, ...}
+        items = []
+        for key, value in data.items():
+            if isinstance(value, Mapping):
+                item = dict(value)
+                item.setdefault("name", key)
+                items.append(item)
+        data = items
+
+    if not isinstance(data, list):
+        return []
+
+    return [normalize_offset(x) for x in data if isinstance(x, Mapping)]
+
+
+def normalize_project_record(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Convert a workflow JSON record into the canonical field-unit schema.
+
+    This function is intentionally tolerant of the earlier names:
+      offset_wells -> offsets
+      latitude_deg / longitude_deg -> latitude / longitude on offsets
+      purpose / Production -> Development-compatible purpose
+    """
+    base = default_project()
+    src = deepcopy(dict(record))
+
+    # Merge top-level sections without destroying defaults.
+    for key, value in src.items():
+        if key == "schema_version":
+            continue
+        if key == "offset_wells":
+            continue
+        base[key] = value
+
+    base["schema_version"] = SCHEMA_VERSION
+    base["project"] = _normalize_project(
+        src.get("project", base["project"])
+    )
+    base["reference"] = _normalize_surface(
+        src.get("reference", base["reference"])
+    )
+
+    # Offsets are always canonicalized into "offsets".
+    raw_offsets = src.get("offsets", src.get("offset_wells", []))
+    base["offsets"] = normalize_offsets(raw_offsets)
+
+    # If surveys are stored separately, keep them. Offset surveys remain
+    # attached to their respective offset as well.
+    if not isinstance(base.get("surveys"), list):
+        base["surveys"] = []
+
+    # Keep trajectory stations separate from survey-manager records.
+    if not isinstance(base.get("trajectory"), Mapping):
+        base["trajectory"] = {"method": "Minimum Curvature", "stations": []}
+    else:
+        base["trajectory"] = dict(base["trajectory"])
+
+    base["project"]["updated_at"] = _now_iso()
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Project object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Project:
+    """Small in-memory project container suitable for Streamlit session state."""
+
+    data: Dict[str, Any] = field(default_factory=default_project)
+
+    def __post_init__(self) -> None:
+        self.data = normalize_project_record(self.data)
+
+    @classmethod
+    def new(cls) -> "Project":
+        return cls(default_project())
+
+    @classmethod
+    def from_dict(cls, record: Mapping[str, Any]) -> "Project":
+        return cls(normalize_project_record(record))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _copy(self.data)
+
+    def update(self, **sections: Any) -> None:
+        for key, value in sections.items():
+            self.data[key] = deepcopy(value)
+        self.data["project"]["updated_at"] = _now_iso()
+
+    # ---- offsets ---------------------------------------------------------
+
+    @property
+    def offsets(self) -> List[Dict[str, Any]]:
+        return self.data.setdefault("offsets", [])
+
+    def add_offset(
+        self,
+        name: str,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+        surface_northing_relative_ft: float = 0.0,
+        surface_easting_relative_ft: float = 0.0,
+        surface_northing_ft: Optional[float] = None,
+        surface_easting_ft: Optional[float] = None,
+        azimuth_reference: str = "Grid North",
+        surveys: Optional[Iterable[Mapping[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        offset = normalize_offset({
+            "name": name,
+            "latitude": latitude,
+            "longitude": longitude,
+            "surface_northing_relative_ft": surface_northing_relative_ft,
+            "surface_easting_relative_ft": surface_easting_relative_ft,
+            "surface_northing_ft": surface_northing_ft,
+            "surface_easting_ft": surface_easting_ft,
+            "azimuth_reference": azimuth_reference,
+            "surveys": list(surveys or []),
+        })
+        self.offsets.append(offset)
+        self.data["project"]["updated_at"] = _now_iso()
+        return offset
+
+    def remove_offset(self, name: str) -> bool:
+        before = len(self.offsets)
+        self.data["offsets"] = [
+            x for x in self.offsets if x.get("name") != name
+        ]
+        changed = len(self.offsets) != before
+        if changed:
+            self.data["project"]["updated_at"] = _now_iso()
+        return changed
+
+    # ---- JSON ------------------------------------------------------------
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(
+            self.to_dict(),
+            indent=indent,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+
+    def save(self, path: str | Path) -> Path:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.to_json() + "\n", encoding="utf-8")
+        return target
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Project":
+        source = Path(path)
+        record = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(record, Mapping):
+            raise ValueError("Project JSON root must be an object.")
+        return cls.from_dict(record)
+
+
+# ---------------------------------------------------------------------------
+# Functional API
+# ---------------------------------------------------------------------------
+
+def create_project() -> Dict[str, Any]:
+    return default_project()
+
+
+def export_project(project: Any, path: str | Path) -> Path:
+    """Export either a Project object or a plain project dictionary."""
+    if isinstance(project, Project):
+        return project.save(path)
+
+    normalized = normalize_project_record(project)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(
+            normalized,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def import_project(path: str | Path) -> Dict[str, Any]:
+    """
+    Import a project safely.
+
+    Nothing is modified outside the returned object. Callers can validate
+    first and only then replace their Streamlit session-state project.
+    """
+    source = Path(path)
     try:
-        from pyproj import CRS; c=CRS.from_user_input(p.get('crs','EPSG:4326')); msg=f'{c.name} ({c.to_string()})'; status='PASS'
-    except Exception as e: msg=str(e); status='FAIL'
-    checks.append({'check':'CRS','status':status,'message':msg})
-    s=p.get('surveys',[]); req={'MD','Inc','Azi'}; ok=bool(s) and req.issubset(s[0])
-    checks.append({'check':'Survey structure','status':'PASS' if ok else 'FAIL','message':'MD, Inc and Azi present.' if ok else 'Survey requires MD, Inc and Azi.'})
-    if s:
-        try: ordered=all(float(b['MD'])>float(a['MD']) for a,b in zip(s,s[1:])); checks.append({'check':'Survey MD ordering','status':'PASS' if ordered else 'FAIL','message':'MD increases strictly.'})
-        except: checks.append({'check':'Survey numeric values','status':'FAIL','message':'Non-numeric survey value detected.'})
-    else: checks.append({'check':'Survey data','status':'WARN','message':'No survey loaded.'})
-    ref=p.get('reference_data',{}); checks.append({'check':'North-reference data','status':'PASS' if ref.get('grid_convergence_deg') is not None or ref.get('magnetic_declination_deg') is not None else 'WARN','message':'Reference corrections available.' if ref.get('grid_convergence_deg') is not None or ref.get('magnetic_declination_deg') is not None else 'Calculate reference corrections.'})
-    checks.append({'check':'Targets','status':'PASS' if p.get('targets') else 'WARN','message':f"{len(p.get('targets',[]))} target(s) defined."})
-    checks.append({'check':'Offsets','status':'PASS' if p.get('offsets') else 'WARN','message':f"{len(p.get('offsets',[]))} offset(s) defined."})
-    checks.append({'check':'Casing architecture','status':'PASS' if p.get('casing_program') else 'WARN','message':'Final casing program stored.' if p.get('casing_program') else 'No casing program stored.'})
-    checks.append({'check':'Model provenance','status':'PASS' if p.get('model_metadata') else 'WARN','message':'Model provenance recorded.' if p.get('model_metadata') else 'No model provenance recorded.'})
-    return checks
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid project JSON: {exc}") from exc
+
+    if not isinstance(raw, Mapping):
+        raise ValueError("Project JSON root must be an object.")
+
+    return normalize_project_record(raw)
+
+
+def project_from_json(text: str) -> Dict[str, Any]:
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid project JSON: {exc}") from exc
+
+    if not isinstance(raw, Mapping):
+        raise ValueError("Project JSON root must be an object.")
+
+    return normalize_project_record(raw)
+
+
+def project_to_json(project: Mapping[str, Any], indent: int = 2) -> str:
+    return json.dumps(
+        normalize_project_record(project),
+        indent=indent,
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def validate_project(project: Mapping[str, Any]) -> List[str]:
+    """
+    Return validation errors. Empty list means the project record is valid
+    enough for workflow persistence.
+    """
+    errors: List[str] = []
+
+    if not isinstance(project, Mapping):
+        return ["Project must be a JSON object."]
+
+    p = project.get("project")
+    if not isinstance(p, Mapping):
+        errors.append("Missing project section.")
+
+    offsets = project.get("offsets", [])
+    if not isinstance(offsets, list):
+        errors.append("offsets must be a list.")
+    else:
+        for i, offset in enumerate(offsets):
+            if not isinstance(offset, Mapping):
+                errors.append(f"offsets[{i}] must be an object.")
+                continue
+            if not offset.get("name"):
+                errors.append(f"offsets[{i}] is missing name.")
+            for key in (
+                "surface_northing_relative_ft",
+                "surface_easting_relative_ft",
+            ):
+                if offset.get(key) is not None and _float(offset.get(key)) is None:
+                    errors.append(f"offsets[{i}].{key} must be numeric.")
+
+    return errors
+
+
+# Backward-compatible aliases used by simple Streamlit workflows.
+ProjectState = Project
+load_project = import_project
+save_project = export_project
