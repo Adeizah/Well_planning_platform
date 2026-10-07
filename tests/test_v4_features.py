@@ -37,3 +37,18 @@ def test_anti_collision_same_well_is_zero():
     off={'name':'OW-01','surveys':[{'MD':0,'Easting':0,'Northing':0,'TVD':0},{'MD':1000,'Easting':100,'Northing':0,'TVD':900}]}
     rep=clearance_report(main,[off],1,1)
     assert not rep.empty and rep.iloc[0]['separation_m'] < 1e-8
+
+
+def test_grid_convergence_is_not_hardcoded():
+    from models.geodesy import grid_convergence_deg
+    assert abs(grid_convergence_deg(9.0466, 9.0, 'EPSG:32632')) < 1e-9
+    assert abs(grid_convergence_deg(9.0466, 10.0, 'EPSG:32632')) > 0.1
+
+
+def test_offset_surface_shift_in_anticollision():
+    import pandas as pd
+    from engineering.anti_collision import clearance_report
+    main=pd.DataFrame([{'MD':0,'Easting':0,'Northing':0,'TVD':0},{'MD':1000,'Easting':100,'Northing':0,'TVD':900}])
+    off={'name':'OW-01','surface_easting_m':100,'surface_northing_m':0,'surveys':[{'MD':0,'Easting':0,'Northing':0,'TVD':0},{'MD':1000,'Easting':100,'Northing':0,'TVD':900}]}
+    rep=clearance_report(main,[off],1,1)
+    assert not rep.empty and rep.iloc[0]['separation_m'] > 50

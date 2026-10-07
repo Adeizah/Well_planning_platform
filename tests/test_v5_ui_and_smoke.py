@@ -69,8 +69,8 @@ def test_reference_requirements_and_conversion():
 
 
 def test_field_unit_conversions():
-    from core.units import M_TO_FT, FT_TO_M, dls_m_to_ft, dls_ft_to_m
+    from core.units import M_TO_FT, FT_TO_M, dls_30m_to_100ft, dls_100ft_to_30m
     assert abs(1.0 * M_TO_FT - 3.280839895013123) < 1e-12
     assert abs(100.0 * FT_TO_M - 30.48) < 1e-12
-    assert abs(dls_m_to_ft(3.0) - 3.0 * 30.0 / 30.48) < 1e-12
-    assert abs(dls_ft_to_m(dls_m_to_ft(3.0)) - 3.0) < 1e-12
+    assert abs(dls_30m_to_100ft(3.0) - 3.048) < 1e-12
+    assert abs(dls_100ft_to_30m(dls_30m_to_100ft(3.0)) - 3.0) < 1e-12
