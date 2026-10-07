@@ -74,10 +74,10 @@ NAV = [
 ]
 NAV_OPTIONS = [item for group, items in NAV for item in items]
 NAV_PREFIX = {
-    'Dashboard':'01', 'Project & Reference':'10', 'Well Architecture':'11', 'Targets':'12', 'Offsets':'13',
-    'Survey Manager':'20', 'Trajectory Planner':'21', 'Geomagnetics':'22', 'Geodesy':'23', 'Anti-Collision':'24',
-    'Casing Design':'30', 'Hydraulics & ECD':'31', 'PP / FG & Mud Window':'32', 'Torque & Drag':'33', 'Cementing':'34', 'Well Control':'35', 'BHA & Drilling':'36',
-    'Visualization':'40', 'QA/QC':'41', 'Reports':'42', 'About':'90'
+    'Dashboard':'01', 'Project & Reference':'02', 'Well Architecture':'03', 'Targets':'04', 'Offsets':'05',
+    'Survey Manager':'06', 'Trajectory Planner':'07', 'Geomagnetics':'08', 'Geodesy':'09', 'Anti-Collision':'10',
+    'Casing Design':'11', 'Hydraulics & ECD':'12', 'PP / FG & Mud Window':'13', 'Torque & Drag':'14', 'Cementing':'15', 'Well Control':'16', 'BHA & Drilling':'17',
+    'Visualization':'18', 'QA/QC':'19', 'Reports':'20', 'About':'21'
 }
 
 # Keep navigation stable across reruns. The engineering model remains in session state.
