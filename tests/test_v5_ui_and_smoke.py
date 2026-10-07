@@ -15,7 +15,9 @@ from engineering.well_control import well_control_screen
 def test_v5_ui_contract_and_navigation():
     app = Path(__file__).parents[1] / "app.py"
     text = app.read_text()
-    assert "Well Planning Platform v5.1" in text
+    assert "Well Planning Platform" in text
+    assert "Well Planning Platform v5.1" not in text
+    assert "v5.1 • desktop engineering workspace" not in text
     for label in [
         "Dashboard", "Project & Reference", "Survey Manager", "Trajectory Planner",
         "Targets", "Offsets", "Well Architecture", "Geomagnetics", "Geodesy",
@@ -54,3 +56,21 @@ def test_v5_engineering_smoke_chain():
     assert cement_screen(12.25, 9.625, 1000, 20, 1.18)["annular_volume_bbl"] > 0
     assert torque_drag_screen(4000, 0.25, 0.82, 19.5, 45, 2)["surface_torque_screen_ftlb"] >= 0
     assert well_control_screen(500, 10000, 10, 1500, 0.65)["kill_mud_weight_ppg"] > 0
+
+
+def test_reference_requirements_and_conversion():
+    from core.reference import reference_requirements, convert_to_project_reference
+    assert reference_requirements('True North')['needs_declination'] is True
+    assert reference_requirements('True North')['needs_convergence'] is False
+    assert reference_requirements('Grid North')['needs_declination'] is True
+    assert reference_requirements('Grid North')['needs_convergence'] is True
+    assert abs(convert_to_project_reference(0, 'Magnetic North', 'True North', 5, 2) - 5) < 1e-9
+    assert abs(convert_to_project_reference(0, 'Magnetic North', 'Grid North', 5, 2) - 3) < 1e-9
+
+
+def test_field_unit_conversions():
+    from core.units import M_TO_FT, FT_TO_M, dls_m_to_ft, dls_ft_to_m
+    assert abs(1.0 * M_TO_FT - 3.280839895013123) < 1e-12
+    assert abs(100.0 * FT_TO_M - 30.48) < 1e-12
+    assert abs(dls_m_to_ft(3.0) - 3.0 * 30.0 / 30.48) < 1e-12
+    assert abs(dls_ft_to_m(dls_m_to_ft(3.0)) - 3.0) < 1e-12
