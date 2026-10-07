@@ -21,19 +21,105 @@ def _deep_merge(base,incoming):
         if isinstance(v,dict) and isinstance(base.get(k),dict): _deep_merge(base[k],v)
         else: base[k]=v
 
+def _workflow_record_to_project(data):
+    """Convert the human-readable field-unit workflow record into the app's internal schema."""
+    FT_TO_M = 0.3048
+    proj = new_project()
+    meta = data.get('project', {})
+    loc = data.get('surface_location', {})
+    vr = data.get('vertical_reference', {})
+    sm = data.get('survey_manager', {})
+    ref = data.get('reference_and_geomagnetics', {})
+    wa = data.get('well_architecture', {})
+    tp = data.get('trajectory_planning', {})
+
+    for k in ['project_name','well_name','well_number','operator','field','site_pad','well_purpose','well_design','status','well_type']:
+        if k in meta: proj[k] = meta[k]
+    proj['latitude'] = float(loc.get('latitude_deg', proj['latitude']))
+    proj['longitude'] = float(loc.get('longitude_deg', proj['longitude']))
+    proj['crs'] = loc.get('crs', proj['crs'])
+    proj['surface_easting_m'] = float(loc.get('surface_easting_ft', 0))*FT_TO_M
+    proj['surface_northing_m'] = float(loc.get('surface_northing_ft', 0))*FT_TO_M
+    proj['elevation_m'] = float(loc.get('elevation_ft_msl', 0))*FT_TO_M
+    proj['kb_m'] = float(loc.get('kb_elevation_ft_msl', 0))*FT_TO_M
+    proj['north_reference'] = ref.get('selected_north_reference', 'Grid North')
+    proj['depth_reference'] = vr.get('depth_reference', 'MD / TVDSS')
+
+    stations = sm.get('stations', [])
+    proj['surveys'] = [{'MD': float(x[0])*FT_TO_M, 'Inc': float(x[1]), 'Azi': float(x[2])} for x in stations]
+    if not proj['surveys']:
+        proj['surveys'] = [{'MD':0.0,'Inc':0.0,'Azi':0.0}]
+    proj['survey_metadata'] = {
+        'azimuth_reference': sm.get('azimuth_reference', proj['north_reference']),
+        'survey_tool': sm.get('survey_tool','MWD'),
+        'survey_method': sm.get('calculation_method','Minimum Curvature'),
+        'positional_sigma_m': 0.0,
+        'uncertainty_model': 'Screening radial uncertainty'
+    }
+    interval_ft = float(sm.get('dls_interval_ft',100))
+    proj['trajectory_metadata'] = {'dls_interval_m': interval_ft*FT_TO_M, 'dls_interval_ft': interval_ft}
+
+    proj['reference_data'].update({
+        k: data.get('reference_and_geomagnetics',{}).get(k)
+        for k in ['grid_convergence_deg','magnetic_declination_deg','magnetic_dip_deg','magnetic_total_field_nT','magnetic_horizontal_field_nT','magnetic_x_nT','magnetic_y_nT','magnetic_z_nT']
+        if data.get('reference_and_geomagnetics',{}).get(k) is not None
+    })
+    proj['reference_data']['source_crs'] = loc.get('crs', 'EPSG:4326')
+    proj['reference_data']['project_crs'] = loc.get('crs', 'EPSG:4326')
+
+    target = data.get('target_a')
+    if target:
+        ell = target.get('ellipse', {})
+        t = {'name': target.get('name','Target A'), 'type':'Elliptical',
+             'north_m': float(target.get('north_ft',0))*FT_TO_M,
+             'east_m': float(target.get('east_ft',0))*FT_TO_M,
+             'tvdss_m': float(target.get('tvdss_ft',0))*FT_TO_M}
+        t['semi_major_m'] = float(ell.get('semi_major_ft',0))*FT_TO_M
+        t['semi_minor_m'] = float(ell.get('semi_minor_ft',0))*FT_TO_M
+        t['orientation_deg'] = float(ell.get('orientation_deg',0))
+        proj['targets'] = [t]
+
+    proj['well_architecture'] = {
+        'planned_td_md_m': float(wa.get('planned_td_md_ft'))*FT_TO_M if wa.get('planned_td_md_ft') is not None else None,
+        'planned_td_tvd_m': float(wa.get('planned_td_tvd_ft'))*FT_TO_M if wa.get('planned_td_tvd_ft') is not None else None,
+        'kop_md_m': float(wa.get('kop_md_ft'))*FT_TO_M if wa.get('kop_md_ft') is not None else None,
+        'trajectory_type': wa.get('trajectory_type', tp.get('profile','Build & Hold'))
+    }
+    casing=[]
+    for c in wa.get('casing_program',[]):
+        casing.append({
+            'string_no': c.get('string_no'), 'type': c.get('type'), 'hole_size_in': c.get('hole_size_in'),
+            'casing_od_in': c.get('casing_od_in'), 'grade': c.get('grade'), 'weight_lbft': c.get('weight_lbft'),
+            'depth_type': c.get('depth_type','MD'),
+            'shoe_md_m': float(c.get('shoe_md_ft',0))*FT_TO_M,
+            'shoe_tvd_m': float(c.get('shoe_tvd_ft',0))*FT_TO_M,
+            'shoe_tvdss_m': float(c.get('shoe_tvdss_ft',0))*FT_TO_M,
+            'top_md_m': float(c.get('top_md_ft',0))*FT_TO_M,
+            'liner_top_m': float(c['liner_top_ft'])*FT_TO_M if c.get('liner_top_ft') is not None else None
+        })
+    proj['casing_program'] = casing
+
+    offsets=[]
+    for ow in data.get('offset_wells',[]):
+        offsets.append({'name':ow.get('name','Offset'), 'azimuth_reference':ow.get('azimuth_reference','Grid North'),
+                        'surveys':[{'MD':float(x[0])*FT_TO_M,'Inc':float(x[1]),'Azi':float(x[2])} for x in ow.get('surveys',[])]})
+    proj['offsets'] = offsets
+    proj['model_metadata'] = {'geomagnetic_models': ref.get('geomagnetic_models',[]), 'preferred_magnetic_quantity': ref.get('preferred_magnetic_quantity')}
+    return proj
+
 def project_from_json(data):
     if not isinstance(data, dict):
         raise ValueError('Invalid project file: the JSON root must be an object.')
+    # Accept both native project exports and the field-unit workflow record we created for this training case.
+    if data.get('record_type') == 'well_planning_workflow_record':
+        return _workflow_record_to_project(data)
     fmt = data.get('_file_format')
     ver = data.get('_file_version')
-    # Accept legacy project exports that predate explicit file metadata.
     if fmt is not None and fmt != PROJECT_FILE_FORMAT:
         raise ValueError('Invalid project file: this JSON was not exported by the Well Planning Platform.')
     if ver is not None:
-        try:
-            ver = int(ver)
-        except Exception:
-            raise ValueError('Invalid project file: unsupported file-version value.')
+        try: ver = int(ver)
+        except Exception: raise ValueError('Invalid project file: unsupported file-version value.')
         if ver > PROJECT_FILE_VERSION:
             raise ValueError(f'Project file version {ver} is newer than this platform supports (v{PROJECT_FILE_VERSION}).')
     p=new_project()
