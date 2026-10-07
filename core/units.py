@@ -1,3 +1,26 @@
+M_TO_FT = 3.280839895013123
+FT_TO_M = 1.0 / M_TO_FT
+
+def m_to_ft(value):
+    return float(value) * M_TO_FT
+
+def ft_to_m(value):
+    return float(value) * FT_TO_M
+
+def dls_m_to_ft(value):
+    return float(value) * (30.0 / 30.48)
+
+def dls_ft_to_m(value):
+    return float(value) * (30.48 / 30.0)
+
+def length_label(unit='Field'):
+    return 'ft' if unit == 'Field' else 'm'
+
+def depth_value_m(value_m, unit='Field'):
+    return m_to_ft(value_m) if unit == 'Field' else float(value_m)
+
+def depth_value_ft(value_ft, unit='Field'):
+    return ft_to_m(value_ft) if unit == 'Field' else float(value_ft)
 
 def sg_to_ppg(sg):
     return float(sg) * 8.345404452
