@@ -62,7 +62,10 @@ def save():
 
 def download_json():
     # Export the shared engineering model, not transient Streamlit widget state.
-    return json.dumps(project_to_json(project), indent=2, ensure_ascii=False).encode('utf-8')
+    exported = project_to_json(project)
+    if isinstance(exported, str):
+        return exported.encode('utf-8')
+    return json.dumps(exported, indent=2, ensure_ascii=False).encode('utf-8')
 
 
 NAV = [
@@ -131,9 +134,17 @@ with st.sidebar:
             if st.session_state.get('last_import_hash') != upload_hash:
                 candidate = project_from_json(json.loads(raw.decode('utf-8')))
                 checks = validate_project(candidate)
-                hard_failures = [c for c in checks if c.get('status') == 'FAIL']
+                hard_failures = [
+                    c for c in checks
+                    if (isinstance(c, dict) and c.get('status') == 'FAIL')
+                    or (isinstance(c, str) and c)
+                ]
                 if hard_failures:
-                    raise ValueError('Project file failed validation: ' + '; '.join(c['message'] for c in hard_failures))
+                    messages = [
+                        c.get('message', str(c)) if isinstance(c, dict) else str(c)
+                        for c in hard_failures
+                    ]
+                    raise ValueError('Project file failed validation: ' + '; '.join(messages))
                 st.session_state.project = candidate
                 st.session_state.last_import_hash = upload_hash
                 st.session_state.active_page = 'Dashboard'
