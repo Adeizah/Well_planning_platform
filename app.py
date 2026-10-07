@@ -77,8 +77,27 @@ NAV_OPTIONS = [item for group, items in NAV for item in items]
 # Hard-coded sequential navigation numbering. These are display labels only;
 # page identity remains the underlying page name so reordering does not alter routing.
 NAV_PREFIX = {
-    page: f'{i:02d}'
-    for i, page in enumerate(NAV_OPTIONS, start=1)
+    'Dashboard': '01',
+    'Project & Reference': '02',
+    'Well Architecture': '03',
+    'Targets': '04',
+    'Offsets': '05',
+    'Survey Manager': '06',
+    'Trajectory Planner': '07',
+    'Geomagnetics': '08',
+    'Geodesy': '09',
+    'Anti-Collision': '10',
+    'Casing Design': '11',
+    'Hydraulics & ECD': '12',
+    'PP / FG & Mud Window': '13',
+    'Torque & Drag': '14',
+    'Cementing': '15',
+    'Well Control': '16',
+    'BHA & Drilling': '17',
+    'Visualization': '18',
+    'QA/QC': '19',
+    'Reports': '20',
+    'About': '21',
 }
 
 # Keep navigation stable across reruns. The engineering model remains in session state.
@@ -346,18 +365,30 @@ elif page=='Targets':
 # Offsets
 elif page=='Offsets':
     page_header('Offset Wells', 'SETUP', 'Create independent reference wells that can be visualized and screened for proximity to the planned well.')
-    a,b,c=st.columns(3); name=a.text_input('Offset name','OW-01'); lat=b.number_input('Offset latitude',-90.,90.,project['latitude']); lon=c.number_input('Offset longitude',-180.,180.,project['longitude'])
-    n,e=st.columns(2); en=n.number_input('Surface Northing relative to main (ft)',-10000.,10000.,0.); ee=e.number_input('Surface Easting relative to main (ft)',-10000.,10000.,0.)
-    if st.button('Create offset well'): project['offsets'].append({'name':name,'latitude':lat,'longitude':lon,'surface_northing_m':en*FT_TO_M,'surface_easting_m':ee*FT_TO_M,'surveys':[{'MD':0.,'Inc':0.,'Azi':0.}]}); save(); st.success('Offset created.')
+    a,b,c=st.columns(3); name=a.text_input('Offset name','OW-01'); lat=b.number_input('Offset latitude',-90.,90.,float(project['latitude']),format='%.6f'); lon=c.number_input('Offset longitude',-180.,180.,float(project['longitude']),format='%.6f')
+    n,e=st.columns(2); en=n.number_input('Surface Northing relative to main (ft)',-100000.,100000.,0.); ee=e.number_input('Surface Easting relative to main (ft)',-100000.,100000.,0.)
+    if st.button('Create offset well'):
+        main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0))
+        project['offsets'].append({'name':name,'latitude':lat,'longitude':lon,'surface_northing_m':main_n+en*FT_TO_M,'surface_easting_m':main_e+ee*FT_TO_M,'surveys':[{'MD':0.,'Inc':0.,'Azi':0.}]}); save(); st.success('Offset created.')
     for i,off in enumerate(project['offsets']):
         with st.expander(f"{i+1}. {off.get('name','Offset')}"):
+            main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0))
+            off_n=float(off.get('surface_northing_m',main_n)); off_e=float(off.get('surface_easting_m',main_e))
+            st.write(f"**Surface location:** {float(off.get('latitude',float('nan'))):.6f}°, {float(off.get('longitude',float('nan'))):.6f}°")
+            st.write(f"**Relative to WN-01:** Northing {((off_n-main_n)*M_TO_FT):.2f} ft, Easting {((off_e-main_e)*M_TO_FT):.2f} ft")
             odf=pd.DataFrame(off.get('surveys',[])); od_display=odf.copy();
             if 'MD' in od_display.columns: od_display['MD']=od_display['MD']*M_TO_FT
             ed=st.data_editor(od_display,num_rows='dynamic',key=f'off{i}',use_container_width=True)
             if st.button(f'Save {off.get("name")}',key=f'saveoff{i}'):
                 try: ed_calc=ed[['MD','Inc','Azi']].copy(); ed_calc['MD']=ed_calc['MD']*FT_TO_M; off['surveys']=minimum_curvature(ed_calc).to_dict('records'); save(); st.success('Saved offset trajectory.')
                 except Exception as ex: st.error(str(ex))
-    if project['offsets']: st.dataframe(pd.DataFrame([{'Name':x.get('name'),'Lat':x.get('latitude'),'Lon':x.get('longitude')} for x in project['offsets']]),use_container_width=True,hide_index=True)
+    if project['offsets']:
+        main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0))
+        rows=[]
+        for x in project['offsets']:
+            on=float(x.get('surface_northing_m',main_n)); oe=float(x.get('surface_easting_m',main_e))
+            rows.append({'Name':x.get('name'),'Lat':x.get('latitude'),'Lon':x.get('longitude'),'Δ Northing (ft)':(on-main_n)*M_TO_FT,'Δ Easting (ft)':(oe-main_e)*M_TO_FT})
+        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
 
 # Well Architecture
 elif page=='Well Architecture':
@@ -386,11 +417,21 @@ elif page=='Geomagnetics':
     dt=st.date_input('Model calculation date',date.fromisoformat(project['planned_date']))
     if st.button(f'Calculate {model}',type='primary'):
         try:
-            r=wmm2025(lat,lon,alt,dt) if model=='WMM2025' else igrf14(lat,lon,alt,dt); ref=project['reference_data']; ref.update({'magnetic_declination_deg':r['D'],'magnetic_dip_deg':r['I'],'magnetic_total_field_nT':r['F'],'magnetic_horizontal_field_nT':r['H'],'magnetic_x_nT':r['X'],'magnetic_y_nT':r['Y'],'magnetic_z_nT':r['Z']}); project['model_metadata'][model]=r['metadata']; project['model_metadata']['active_geomagnetic_model']=model; save(); st.success(f'{model} result stored.')
+            r=wmm2025(lat,lon,alt,dt) if model=='WMM2025' else igrf14(lat,lon,alt,dt)
+            ref=project['reference_data']; ref.update({'magnetic_declination_deg':r['D'],'magnetic_dip_deg':r['I'],'magnetic_total_field_nT':r['F'],'magnetic_horizontal_field_nT':r['H'],'magnetic_x_nT':r['X'],'magnetic_y_nT':r['Y'],'magnetic_z_nT':r['Z']})
+            project.setdefault('model_metadata',{}).setdefault('results',{})[model] = r
+            project['model_metadata'][model]=r['metadata']; project['model_metadata']['active_geomagnetic_model']=model
+            save(); st.success(f'{model} result stored.')
         except Exception as e: st.error(f'{model} calculation failed: {e}')
-    r=project['reference_data']; st.dataframe(pd.DataFrame([{'Quantity':'Declination','Value':r.get('magnetic_declination_deg'),'Unit':'deg'},{'Quantity':'Dip','Value':r.get('magnetic_dip_deg'),'Unit':'deg'},{'Quantity':'Total field','Value':r.get('magnetic_total_field_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
+    stored=project.get('model_metadata',{}).get('results',{}).get(model)
+    if stored:
+        r=stored
+    else:
+        # Only show legacy shared values for WMM; never present WMM values as IGRF output.
+        r=project['reference_data'] if model=='WMM2025' else {'D':None,'I':None,'F':None,'H':None,'X':None,'Y':None,'Z':None}
+    st.dataframe(pd.DataFrame([{'Quantity':'Declination','Value':r.get('D') if 'D' in r else r.get('magnetic_declination_deg'),'Unit':'deg'},{'Quantity':'Dip','Value':r.get('I') if 'I' in r else r.get('magnetic_dip_deg'),'Unit':'deg'},{'Quantity':'Total field','Value':r.get('F') if 'F' in r else r.get('magnetic_total_field_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
     with st.expander('Advanced model details — field components'):
-        st.dataframe(pd.DataFrame([{'Component':'X','Value':r.get('magnetic_x_nT'),'Unit':'nT'},{'Component':'Y','Value':r.get('magnetic_y_nT'),'Unit':'nT'},{'Component':'Z','Value':r.get('magnetic_z_nT'),'Unit':'nT'},{'Component':'Horizontal field H','Value':r.get('magnetic_horizontal_field_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
+        st.dataframe(pd.DataFrame([{'Component':'X','Value':r.get('X') if 'X' in r else r.get('magnetic_x_nT'),'Unit':'nT'},{'Component':'Y','Value':r.get('Y') if 'Y' in r else r.get('magnetic_y_nT'),'Unit':'nT'},{'Component':'Z','Value':r.get('Z') if 'Z' in r else r.get('magnetic_z_nT'),'Unit':'nT'},{'Component':'Horizontal field H','Value':r.get('H') if 'H' in r else r.get('magnetic_horizontal_field_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
     st.markdown('### North-reference converter'); a,b,c,d=st.columns(4); az=a.number_input('Azimuth (°)',0.,360.,0.); fr=b.selectbox('From',['Magnetic','True','Grid']); to=c.selectbox('To',['Magnetic','True','Grid']);
     if d.button('Convert'):
         needs_dec=fr!=to and ('Magnetic' in (fr,to)); needs_conv=fr!=to and ('Grid' in (fr,to)); dec=r.get('magnetic_declination_deg'); conv=r.get('grid_convergence_deg')
