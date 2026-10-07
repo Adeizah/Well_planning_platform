@@ -74,3 +74,9 @@ def test_field_unit_conversions():
     assert abs(100.0 * FT_TO_M - 30.48) < 1e-12
     assert abs(dls_30m_to_100ft(3.0) - 3.048) < 1e-12
     assert abs(dls_100ft_to_30m(dls_30m_to_100ft(3.0)) - 3.0) < 1e-12
+    # Compatibility aliases prevent older deployed app revisions from
+    # failing at import time while the repository transitions to explicit
+    # 30 m / 100 ft DLS naming.
+    from core.units import dls_m_to_ft, dls_ft_to_m
+    assert abs(dls_m_to_ft(3.0) - 3.048) < 1e-12
+    assert abs(dls_ft_to_m(3.048) - 3.0) < 1e-12
