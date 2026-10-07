@@ -74,10 +74,32 @@ NAV = [
     ('SYSTEM', ['About']),
 ]
 NAV_OPTIONS = [item for group, items in NAV for item in items]
-# Stable sequential navigation numbering. The number identifies the module, not the section group.
+# Hard-coded navigation numbering. These labels intentionally preserve the
+# original engineering-workflow numbering used by the platform. Do not derive
+# these numbers from list position: adding/reordering modules must not change
+# the established navigation numbers.
 NAV_PREFIX = {
-    name: f'{i:02d}'
-    for i, name in enumerate([item for _, items in NAV for item in items], start=1)
+    'Dashboard': '01',
+    'Project & Reference': '10',
+    'Well Architecture': '11',
+    'Targets': '12',
+    'Offsets': '13',
+    'Survey Manager': '20',
+    'Trajectory Planner': '21',
+    'Geomagnetics': '22',
+    'Geodesy': '23',
+    'Anti-Collision': '24',
+    'Casing Design': '30',
+    'Hydraulics & ECD': '31',
+    'PP / FG & Mud Window': '32',
+    'Torque & Drag': '33',
+    'Cementing': '34',
+    'Well Control': '35',
+    'BHA & Drilling': '36',
+    'Visualization': '40',
+    'QA/QC': '41',
+    'Reports': '42',
+    'About': '90',
 }
 
 # Keep navigation stable across reruns. The engineering model remains in session state.
