@@ -35,27 +35,6 @@ def _workflow_record_to_project(data):
 
     for k in ['project_name','well_name','well_number','operator','field','site_pad','well_purpose','well_design','status','well_type']:
         if k in meta: proj[k] = meta[k]
-
-    # Normalize workflow-record terminology to the application's controlled vocabularies.
-    # The workflow record intentionally uses "Production" as a purpose, while the UI
-    # models this as the broader "Development" purpose and keeps well type separate.
-    purpose_map = {
-        'Production': 'Development',
-        'Development Producer': 'Development',
-        'Producer': 'Development',
-        'Development Well': 'Development',
-    }
-    design_options = {'Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'}
-    purpose_options = {'Exploration','Appraisal','Development','Injection','Sidetrack','Other'}
-    status_options = {'Planning','Draft','Under Review','Approved for Training'}
-    if proj.get('well_purpose') in purpose_map:
-        proj['well_purpose'] = purpose_map[proj['well_purpose']]
-    if proj.get('well_purpose') not in purpose_options:
-        proj['well_purpose'] = 'Development'
-    if proj.get('well_design') not in design_options:
-        proj['well_design'] = 'Build & Hold'
-    if proj.get('status') not in status_options:
-        proj['status'] = 'Planning'
     proj['latitude'] = float(loc.get('latitude_deg', proj['latitude']))
     proj['longitude'] = float(loc.get('longitude_deg', proj['longitude']))
     proj['crs'] = loc.get('crs', proj['crs'])
@@ -120,37 +99,23 @@ def _workflow_record_to_project(data):
         })
     proj['casing_program'] = casing
 
-    # Offset wells: preserve geographic wellhead coordinates and derive projected coordinates
-    # from the project CRS when lat/long are present. Relative offsets remain available for
-    # legacy records that only contain local displacements.
     offsets=[]
-    for ow in data.get('offset_wells',[]):
-        off={'name':ow.get('name','Offset'), 'azimuth_reference':ow.get('azimuth_reference','Grid North')}
-        if ow.get('latitude_deg') is not None or ow.get('longitude_deg') is not None:
-            if ow.get('latitude_deg') is None or ow.get('longitude_deg') is None:
-                raise ValueError(f"Offset {off['name']} must contain both latitude_deg and longitude_deg.")
-            off['latitude']=float(ow['latitude_deg'])
-            off['longitude']=float(ow['longitude_deg'])
-            try:
-                from pyproj import Transformer, CRS
-                crs=CRS.from_user_input(proj.get('crs','EPSG:4326'))
-                if crs.is_projected:
-                    tr=Transformer.from_crs('EPSG:4326', crs, always_xy=True)
-                    e,n=tr.transform(off['longitude'], off['latitude'])
-                    off['surface_easting_m']=float(e)
-                    off['surface_northing_m']=float(n)
-            except Exception:
-                pass
-        if ow.get('surface_easting_ft') is not None:
-            off['surface_easting_m']=float(ow['surface_easting_ft'])*FT_TO_M
-        if ow.get('surface_northing_ft') is not None:
-            off['surface_northing_m']=float(ow['surface_northing_ft'])*FT_TO_M
-        if ow.get('surface_easting_relative_ft') is not None:
-            off['surface_easting_relative_m']=float(ow['surface_easting_relative_ft'])*FT_TO_M
-        if ow.get('surface_northing_relative_ft') is not None:
-            off['surface_northing_relative_m']=float(ow['surface_northing_relative_ft'])*FT_TO_M
-        off['surveys']=[{'MD':float(x[0])*FT_TO_M,'Inc':float(x[1]),'Azi':float(x[2])} for x in ow.get('surveys',[])]
-        offsets.append(off)
+    raw_offsets = data.get('offsets') or data.get('offset_wells') or []
+    for ow in raw_offsets:
+        lat = ow.get('latitude', ow.get('latitude_deg'))
+        lon = ow.get('longitude', ow.get('longitude_deg'))
+        e_ft = ow.get('surface_easting_ft')
+        n_ft = ow.get('surface_northing_ft')
+        item = {
+            'name': ow.get('name','Offset'),
+            'azimuth_reference': ow.get('azimuth_reference','Grid North'),
+            'surveys':[{'MD':float(x[0])*FT_TO_M,'Inc':float(x[1]),'Azi':float(x[2])} for x in ow.get('surveys',[])]
+        }
+        if lat is not None: item['latitude'] = float(lat)
+        if lon is not None: item['longitude'] = float(lon)
+        if e_ft is not None: item['surface_easting_m'] = float(e_ft) * FT_TO_M
+        if n_ft is not None: item['surface_northing_m'] = float(n_ft) * FT_TO_M
+        offsets.append(item)
     proj['offsets'] = offsets
     proj['model_metadata'] = {'geomagnetic_models': ref.get('geomagnetic_models',[]), 'preferred_magnetic_quantity': ref.get('preferred_magnetic_quantity')}
     return proj
