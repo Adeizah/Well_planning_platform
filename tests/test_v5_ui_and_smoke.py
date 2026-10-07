@@ -15,7 +15,7 @@ from engineering.well_control import well_control_screen
 def test_v5_ui_contract_and_navigation():
     app = Path(__file__).parents[1] / "app.py"
     text = app.read_text()
-    assert "Well Planning Platform v5.0" in text
+    assert "Well Planning Platform v5.1" in text
     for label in [
         "Dashboard", "Project & Reference", "Survey Manager", "Trajectory Planner",
         "Targets", "Offsets", "Well Architecture", "Geomagnetics", "Geodesy",
@@ -34,6 +34,8 @@ def test_v5_shared_model_roundtrip():
     assert q["project_name"] == "UI Regression"
     assert q["well_name"] == "W-05"
     assert q["schema_version"] == "4.0"  # UI release does not break the engineering schema.
+    assert q["units"] == "Field"
+    assert "site_pad" in q and "well_design" in q
 
 
 def test_v5_engineering_smoke_chain():
