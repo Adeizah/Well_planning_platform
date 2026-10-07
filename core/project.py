@@ -2,11 +2,19 @@ from datetime import date
 import copy
 
 SCHEMA_VERSION='4.0'
+PROJECT_FILE_FORMAT='well-planning-project'
+PROJECT_FILE_VERSION=1
 
 def new_project():
     return {'schema_version':SCHEMA_VERSION,'project_name':'New Well Planning Project','well_name':'NEW-01','operator':'','field':'','site_pad':'','well_number':'NEW-01','well_purpose':'Development','well_design':'Build & Hold','status':'Planning','well_type':'Development Producer','latitude':4.8,'longitude':6.9,'surface_easting_m':0.0,'surface_northing_m':0.0,'elevation_m':25.0,'kb_m':25.0,'crs':'EPSG:4326','planned_date':str(date.today()),'north_reference':'Grid North','depth_reference':'MD / TVDSS','units':'Field','notes':'','design_constraints':{'max_dls_deg_30m':3.0,'max_inclination_deg':70.0,'max_build_rate_deg_30m':3.0,'max_turn_rate_deg_30m':3.0},'surveys':[{'MD':0.0,'Inc':0.0,'Azi':0.0}], 'survey_metadata':{'azimuth_reference':'Grid North','survey_tool':'MWD','survey_method':'Minimum Curvature','positional_sigma_m':0.0,'uncertainty_model':'Screening radial uncertainty'},'targets':[],'offsets':[],'model_metadata':{},'trajectory_metadata':{},'reference_data':{'grid_convergence_deg':None,'magnetic_declination_deg':None,'magnetic_dip_deg':None,'magnetic_total_field_nT':None,'magnetic_horizontal_field_nT':None,'magnetic_x_nT':None,'magnetic_y_nT':None,'magnetic_z_nT':None,'gravity_mps2':None,'geoid_height_m':None,'geoid_model':None,'source_crs':'EPSG:4326','project_crs':'EPSG:4326','datum':None,'ellipsoid':None},'well_architecture':{'planned_td_md_m':None,'planned_td_tvd_m':None,'kop_md_m':None,'trajectory_type':'Build & Hold'},'casing_program':[],'geology':[],'bha':[],'engineering_assumptions':{}}
 
-def project_to_json(project): return copy.deepcopy(project)
+def project_to_json(project):
+    out = copy.deepcopy(project)
+    # File metadata is deliberately separate from the engineering schema version.
+    # This lets the project file format evolve without breaking the engineering model.
+    out['_file_format'] = PROJECT_FILE_FORMAT
+    out['_file_version'] = PROJECT_FILE_VERSION
+    return out
 
 def _deep_merge(base,incoming):
     for k,v in incoming.items():
@@ -14,7 +22,25 @@ def _deep_merge(base,incoming):
         else: base[k]=v
 
 def project_from_json(data):
-    p=new_project(); _deep_merge(p,data); p['schema_version']=SCHEMA_VERSION; return p
+    if not isinstance(data, dict):
+        raise ValueError('Invalid project file: the JSON root must be an object.')
+    fmt = data.get('_file_format')
+    ver = data.get('_file_version')
+    # Accept legacy project exports that predate explicit file metadata.
+    if fmt is not None and fmt != PROJECT_FILE_FORMAT:
+        raise ValueError('Invalid project file: this JSON was not exported by the Well Planning Platform.')
+    if ver is not None:
+        try:
+            ver = int(ver)
+        except Exception:
+            raise ValueError('Invalid project file: unsupported file-version value.')
+        if ver > PROJECT_FILE_VERSION:
+            raise ValueError(f'Project file version {ver} is newer than this platform supports (v{PROJECT_FILE_VERSION}).')
+    p=new_project()
+    clean={k:v for k,v in data.items() if not k.startswith('_')}
+    _deep_merge(p,clean)
+    p['schema_version']=SCHEMA_VERSION
+    return p
 
 def validate_project(p):
     checks=[]
