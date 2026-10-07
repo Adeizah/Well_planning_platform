@@ -35,6 +35,27 @@ def _workflow_record_to_project(data):
 
     for k in ['project_name','well_name','well_number','operator','field','site_pad','well_purpose','well_design','status','well_type']:
         if k in meta: proj[k] = meta[k]
+
+    # Normalize workflow-record terminology to the application's controlled vocabularies.
+    # The workflow record intentionally uses "Production" as a purpose, while the UI
+    # models this as the broader "Development" purpose and keeps well type separate.
+    purpose_map = {
+        'Production': 'Development',
+        'Development Producer': 'Development',
+        'Producer': 'Development',
+        'Development Well': 'Development',
+    }
+    design_options = {'Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'}
+    purpose_options = {'Exploration','Appraisal','Development','Injection','Sidetrack','Other'}
+    status_options = {'Planning','Draft','Under Review','Approved for Training'}
+    if proj.get('well_purpose') in purpose_map:
+        proj['well_purpose'] = purpose_map[proj['well_purpose']]
+    if proj.get('well_purpose') not in purpose_options:
+        proj['well_purpose'] = 'Development'
+    if proj.get('well_design') not in design_options:
+        proj['well_design'] = 'Build & Hold'
+    if proj.get('status') not in status_options:
+        proj['status'] = 'Planning'
     proj['latitude'] = float(loc.get('latitude_deg', proj['latitude']))
     proj['longitude'] = float(loc.get('longitude_deg', proj['longitude']))
     proj['crs'] = loc.get('crs', proj['crs'])
