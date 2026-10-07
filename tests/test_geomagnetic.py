@@ -30,3 +30,29 @@ def test_igrf_wrapper_normalizes_python_datetime(monkeypatch):
     r=igrf14(9,9,20,date(2026,10,7))
     assert seen['dt'].__class__.__name__ == 'datetime'
     assert abs(r['X']-4.0)<1e-12 and abs(r['Y']-3.0)<1e-12 and abs(r['Z']+5.0)<1e-12
+
+
+def test_igrf_wrapper_extracts_one_element_numpy_arrays(monkeypatch):
+    import numpy as np
+    class FakePP:
+        @staticmethod
+        def igrf(lon, lat, h, dt):
+            return np.array([3.0]), np.array([4.0]), np.array([5.0])
+    monkeypatch.setitem(sys.modules, 'ppigrf', FakePP)
+    from models.geomagnetic import igrf14
+    r = igrf14(9, 9, 20, date(2026, 10, 7))
+    assert abs(r['X'] - 4.0) < 1e-12
+    assert abs(r['Y'] - 3.0) < 1e-12
+    assert abs(r['Z'] + 5.0) < 1e-12
+    assert abs(r['H'] - 5.0) < 1e-12
+    assert abs(r['F'] - (50.0 ** 0.5)) < 1e-12
+
+
+def test_project_reference_conversion_uses_stored_grid_convergence():
+    from core.reference import convert_to_project_reference
+    # Magnetic 100 -> True 110 -> Grid 105 when D=10 and convergence=5.
+    out = convert_to_project_reference(
+        100, 'Magnetic North', 'Grid North',
+        declination_deg=10, convergence_deg=5
+    )
+    assert abs(out - 105.0) < 1e-12
