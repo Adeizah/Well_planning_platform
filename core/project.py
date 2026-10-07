@@ -173,6 +173,18 @@ def project_from_json(data):
     p=new_project()
     clean={k:v for k,v in data.items() if not k.startswith('_')}
     _deep_merge(p,clean)
+    # Normalize imported/native project values before any UI selectboxes render.
+    purpose_map = {
+        'Production': 'Development',
+        'Development Producer': 'Development',
+        'Producer': 'Development',
+        'Development Well': 'Development',
+    }
+    purpose_options = {'Exploration','Appraisal','Development','Injection','Sidetrack','Other'}
+    if p.get('well_purpose') in purpose_map:
+        p['well_purpose'] = purpose_map[p['well_purpose']]
+    if p.get('well_purpose') not in purpose_options:
+        p['well_purpose'] = 'Development'
     p['schema_version']=SCHEMA_VERSION
     return p
 
