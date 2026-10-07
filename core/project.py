@@ -120,10 +120,37 @@ def _workflow_record_to_project(data):
         })
     proj['casing_program'] = casing
 
+    # Offset wells: preserve geographic wellhead coordinates and derive projected coordinates
+    # from the project CRS when lat/long are present. Relative offsets remain available for
+    # legacy records that only contain local displacements.
     offsets=[]
     for ow in data.get('offset_wells',[]):
-        offsets.append({'name':ow.get('name','Offset'), 'azimuth_reference':ow.get('azimuth_reference','Grid North'),
-                        'surveys':[{'MD':float(x[0])*FT_TO_M,'Inc':float(x[1]),'Azi':float(x[2])} for x in ow.get('surveys',[])]})
+        off={'name':ow.get('name','Offset'), 'azimuth_reference':ow.get('azimuth_reference','Grid North')}
+        if ow.get('latitude_deg') is not None or ow.get('longitude_deg') is not None:
+            if ow.get('latitude_deg') is None or ow.get('longitude_deg') is None:
+                raise ValueError(f"Offset {off['name']} must contain both latitude_deg and longitude_deg.")
+            off['latitude']=float(ow['latitude_deg'])
+            off['longitude']=float(ow['longitude_deg'])
+            try:
+                from pyproj import Transformer, CRS
+                crs=CRS.from_user_input(proj.get('crs','EPSG:4326'))
+                if crs.is_projected:
+                    tr=Transformer.from_crs('EPSG:4326', crs, always_xy=True)
+                    e,n=tr.transform(off['longitude'], off['latitude'])
+                    off['surface_easting_m']=float(e)
+                    off['surface_northing_m']=float(n)
+            except Exception:
+                pass
+        if ow.get('surface_easting_ft') is not None:
+            off['surface_easting_m']=float(ow['surface_easting_ft'])*FT_TO_M
+        if ow.get('surface_northing_ft') is not None:
+            off['surface_northing_m']=float(ow['surface_northing_ft'])*FT_TO_M
+        if ow.get('surface_easting_relative_ft') is not None:
+            off['surface_easting_relative_m']=float(ow['surface_easting_relative_ft'])*FT_TO_M
+        if ow.get('surface_northing_relative_ft') is not None:
+            off['surface_northing_relative_m']=float(ow['surface_northing_relative_ft'])*FT_TO_M
+        off['surveys']=[{'MD':float(x[0])*FT_TO_M,'Inc':float(x[1]),'Azi':float(x[2])} for x in ow.get('surveys',[])]
+        offsets.append(off)
     proj['offsets'] = offsets
     proj['model_metadata'] = {'geomagnetic_models': ref.get('geomagnetic_models',[]), 'preferred_magnetic_quantity': ref.get('preferred_magnetic_quantity')}
     return proj
