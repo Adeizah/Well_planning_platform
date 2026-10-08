@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from core.project import new_project, project_to_json, project_from_json, validate_project
-from core.trajectory import minimum_curvature, build_constant_build_hold
+from core.trajectory import minimum_curvature, build_constant_build_hold, solve_build_hold_hold_inclination
 from core.geometry import target_boundary
 from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to_magnetic, magnetic_to_grid, grid_to_magnetic, reference_requirements, convert_to_project_reference
 from models.geomagnetic import wmm2025, igrf14
@@ -319,14 +319,28 @@ elif page=='Trajectory Planner':
     target_n=float(t.get('north_m',0)); target_e=float(t.get('east_m',0)); rel_n=target_n-surface_n; rel_e=target_e-surface_e
     target_tvdss=float(t.get('tvdss_m',0)); target_tvd=float(project.get('kb_m',0))-target_tvdss
     default_az=(math.degrees(math.atan2(rel_e,rel_n))%360.0) if abs(rel_n)+abs(rel_e)>1e-9 else 0.0
-    a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold=c.number_input('Hold inclination (°)',1.,120.,60.); az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
+    max_inc=float(project.get('design_constraints',{}).get('max_inclination_deg',57.0) or 57.0)
+    default_hold=min(57.0,max_inc)
+    a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold_mode=c.selectbox('Hold inclination mode',['Manual','Solve to target']); hold=c.number_input('Hold inclination (°)',1.,max(1.0,max_inc),default_hold,help='Manual candidate hold angle. It cannot exceed the project maximum inclination.') if hold_mode=='Manual' else default_hold; az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
     a,b,c=st.columns(3); a.number_input('Target TVD (ft)',0.,49213.,target_tvd*M_TO_FT,disabled=True); b.number_input('Target Northing offset (ft)',-3280840.,3280840.,rel_n*M_TO_FT,disabled=True); c.number_input('Target Easting offset (ft)',-3280840.,3280840.,rel_e*M_TO_FT,disabled=True)
+    st.caption(f'Maximum inclination constraint: **{max_inc:.1f}°** • Target azimuth from project-grid geometry: **{default_az:.2f}° Grid**')
     kop=kop_ft*FT_TO_M; br=dls_100ft_to_30m(br_ft); td=target_tvd; n=rel_n; e=rel_e
     if target_tvd <= 0: st.error('Target TVD must be positive after applying the KB/TVDSS reference conversion.'); st.stop()
+    max_build_ft=dls_30m_to_100ft(float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',br)))
+    if br_ft > max_build_ft+1e-9: st.warning(f'Build rate exceeds the project maximum build-rate constraint of {max_build_ft:.2f}°/100 ft.')
+    if hold_mode=='Manual' and hold > max_inc: st.error('Hold inclination exceeds the project maximum inclination constraint.')
+    if abs(az-default_az)>0.05: st.warning(f'Planning azimuth differs from the target-center azimuth by {abs(az-default_az):.2f}°. The candidate will not be target-center aligned without additional directional correction.')
     if st.button('Generate build/hold candidate',type='primary'):
         try:
-            out,meta=build_constant_build_hold(kop,br,hold,az,td,n,e,station_interval=30)
-            project['surveys']=out.to_dict('records'); project['trajectory_metadata']={'planner':'Constant Build + Hold','planner_result':meta,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z'}; save(); st.success(f"Planner status: {meta['status']} • lateral error {meta['lateral_error_m']*M_TO_FT:.1f} ft • TVD error {meta['tvd_error_m']*M_TO_FT:.1f} ft"); out_display=out.copy(); [out_display.__setitem__(cc,out_display[cc]*M_TO_FT) for cc in ['MD','TVD','Northing','Easting','VS'] if cc in out_display.columns]; out_display['TVDSS']=(float(project.get('kb_m',0))-out['TVD'])*M_TO_FT; out_display['DLS']=out_display['DLS'].map(lambda x:dls_for_interval_to_100ft(x,30.0)); st.dataframe(out_display,use_container_width=True,hide_index=True)
+            if hold_mode=='Solve to target':
+                out,meta=solve_build_hold_hold_inclination(kop,br,max_inc,az,td,n,e,station_interval=30)
+                hold=float(meta['hold_inclination_deg'])
+            else:
+                out,meta=build_constant_build_hold(kop,br,hold,az,td,n,e,station_interval=30)
+            project['surveys']=out.to_dict('records'); project['trajectory_metadata']={'planner':'Constant Build + Hold','planner_result':meta,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z'}; save()
+            st.success(f"Planner status: {meta['status']} • lateral error {meta['lateral_error_m']*M_TO_FT:.1f} ft • TVD error {meta['tvd_error_m']*M_TO_FT:.1f} ft • hold {hold:.2f}°")
+            b1,b2,b3,b4=st.columns(4); b1.metric('Build end / EOB',f"{meta['build_end_md_m']*M_TO_FT:,.0f} ft"); b2.metric('Build length',f"{meta['build_length_m']*M_TO_FT:,.0f} ft"); b3.metric('Final MD',f"{meta['final_md_m']*M_TO_FT:,.0f} ft"); b4.metric('Hold margin',f"{meta.get('hold_inclination_margin_deg',max_inc-hold):.1f}°")
+            out_display=out.copy(); [out_display.__setitem__(cc,out_display[cc]*M_TO_FT) for cc in ['MD','TVD','Northing','Easting','VS'] if cc in out_display.columns]; out_display['TVDSS']=(float(project.get('kb_m',0))-out['TVD'])*M_TO_FT; out_display['DLS']=out_display['DLS'].map(lambda x:dls_for_interval_to_100ft(x,30.0)); st.dataframe(out_display,use_container_width=True,hide_index=True)
         except Exception as ex: st.error(str(ex))
 
 # Targets
@@ -364,30 +378,34 @@ elif page=='Targets':
 
 # Offsets
 elif page=='Offsets':
-    page_header('Offset Wells', 'SETUP', 'Create independent reference wells that can be visualized and screened for proximity to the planned well.')
+    page_header('Offset Wells', 'SETUP', 'Create independent reference wells. Surface latitude/longitude are transformed automatically into the project CRS; relative project-grid offsets are then derived.')
     a,b,c=st.columns(3); name=a.text_input('Offset name','OW-01'); lat=b.number_input('Offset latitude',-90.,90.,float(project['latitude']),format='%.6f'); lon=c.number_input('Offset longitude',-180.,180.,float(project['longitude']),format='%.6f')
-    n,e=st.columns(2); en=n.number_input('Surface Northing relative to main (ft)',-100000.,100000.,0.); ee=e.number_input('Surface Easting relative to main (ft)',-100000.,100000.,0.)
-    if st.button('Create offset well'):
+    try:
+        off_e,off_n=transform_coordinates(lon,lat,'EPSG:4326',project.get('crs','EPSG:4326'))
         main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0))
-        project['offsets'].append({'name':name,'latitude':lat,'longitude':lon,'surface_northing_m':main_n+en*FT_TO_M,'surface_easting_m':main_e+ee*FT_TO_M,'surveys':[{'MD':0.,'Inc':0.,'Azi':0.}]}); save(); st.success('Offset created.')
+        st.info(f'Automatically transformed to project CRS {project.get("crs")}: Easting {off_e*M_TO_FT:,.2f} ft • Northing {off_n*M_TO_FT:,.2f} ft • Relative ΔN {(off_n-main_n)*M_TO_FT:,.2f} ft • ΔE {(off_e-main_e)*M_TO_FT:,.2f} ft')
+    except Exception as ex:
+        off_e=off_n=None; st.error(f'Offset coordinate transformation failed: {ex}')
+    if st.button('Create offset well'):
+        if off_e is None: st.error('Cannot create offset without a valid project-coordinate transformation.')
+        else:
+            project['offsets'].append({'name':name,'latitude':lat,'longitude':lon,'surface_northing_m':off_n,'surface_easting_m':off_e,'crs':project.get('crs'),'north_reference':project.get('north_reference','Grid North'),'azimuth_reference':project.get('north_reference','Grid North'),'surveys':[{'MD':0.,'Inc':0.,'Azi':0.}]}); save(); st.success('Offset created in the project CRS.')
     for i,off in enumerate(project['offsets']):
         with st.expander(f"{i+1}. {off.get('name','Offset')}"):
-            main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0))
-            off_n=float(off.get('surface_northing_m',main_n)); off_e=float(off.get('surface_easting_m',main_e))
+            main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0)); off_n=float(off.get('surface_northing_m',main_n)); off_e=float(off.get('surface_easting_m',main_e))
             st.write(f"**Surface location:** {float(off.get('latitude',float('nan'))):.6f}°, {float(off.get('longitude',float('nan'))):.6f}°")
-            st.write(f"**Relative to WN-01:** Northing {((off_n-main_n)*M_TO_FT):.2f} ft, Easting {((off_e-main_e)*M_TO_FT):.2f} ft")
+            st.write(f"**Project CRS:** {off.get('crs',project.get('crs'))}  •  **Relative to WN-01:** Northing {((off_n-main_n)*M_TO_FT):.2f} ft, Easting {((off_e-main_e)*M_TO_FT):.2f} ft")
             odf=pd.DataFrame(off.get('surveys',[])); od_display=odf.copy();
             if 'MD' in od_display.columns: od_display['MD']=od_display['MD']*M_TO_FT
             ed=st.data_editor(od_display,num_rows='dynamic',key=f'off{i}',use_container_width=True)
             if st.button(f'Save {off.get("name")}',key=f'saveoff{i}'):
-                try: ed_calc=ed[['MD','Inc','Azi']].copy(); ed_calc['MD']=ed_calc['MD']*FT_TO_M; off['surveys']=minimum_curvature(ed_calc).to_dict('records'); save(); st.success('Saved offset trajectory.')
+                try:
+                    ed_calc=ed[['MD','Inc','Azi']].copy(); ed_calc['MD']=ed_calc['MD']*FT_TO_M; off['surveys']=minimum_curvature(ed_calc).to_dict('records'); off['crs']=project.get('crs'); off['north_reference']=project.get('north_reference','Grid North'); save(); st.success('Saved offset trajectory.')
                 except Exception as ex: st.error(str(ex))
     if project['offsets']:
-        main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0))
-        rows=[]
+        main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0)); rows=[]
         for x in project['offsets']:
-            on=float(x.get('surface_northing_m',main_n)); oe=float(x.get('surface_easting_m',main_e))
-            rows.append({'Name':x.get('name'),'Lat':x.get('latitude'),'Lon':x.get('longitude'),'Δ Northing (ft)':(on-main_n)*M_TO_FT,'Δ Easting (ft)':(oe-main_e)*M_TO_FT})
+            on=float(x.get('surface_northing_m',main_n)); oe=float(x.get('surface_easting_m',main_e)); rows.append({'Name':x.get('name'),'Lat':x.get('latitude'),'Lon':x.get('longitude'),'CRS':x.get('crs',project.get('crs')),'Δ Northing (ft)':(on-main_n)*M_TO_FT,'Δ Easting (ft)':(oe-main_e)*M_TO_FT})
         st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
 
 # Well Architecture
@@ -432,13 +450,17 @@ elif page=='Geomagnetics':
     st.dataframe(pd.DataFrame([{'Quantity':'Declination','Value':r.get('D') if 'D' in r else r.get('magnetic_declination_deg'),'Unit':'deg'},{'Quantity':'Dip','Value':r.get('I') if 'I' in r else r.get('magnetic_dip_deg'),'Unit':'deg'},{'Quantity':'Total field','Value':r.get('F') if 'F' in r else r.get('magnetic_total_field_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
     with st.expander('Advanced model details — field components'):
         st.dataframe(pd.DataFrame([{'Component':'X','Value':r.get('X') if 'X' in r else r.get('magnetic_x_nT'),'Unit':'nT'},{'Component':'Y','Value':r.get('Y') if 'Y' in r else r.get('magnetic_y_nT'),'Unit':'nT'},{'Component':'Z','Value':r.get('Z') if 'Z' in r else r.get('magnetic_z_nT'),'Unit':'nT'},{'Component':'Horizontal field H','Value':r.get('H') if 'H' in r else r.get('magnetic_horizontal_field_nT'),'Unit':'nT'}]),use_container_width=True,hide_index=True)
-    st.markdown('### North-reference converter'); a,b,c,d=st.columns(4); az=a.number_input('Azimuth (°)',0.,360.,0.); fr=b.selectbox('From',['Magnetic','True','Grid']); to=c.selectbox('To',['Magnetic','True','Grid']);
-    if d.button('Convert'):
+    st.markdown('### North-reference converter')
+    st.caption('Use this when an azimuth from a survey, MWD report or external dataset is expressed relative to a different north than the project. It changes the reference of the direction; it does not change the physical direction.')
+    st.markdown('**Magnetic → True → Grid** is the normal path when an MWD azimuth must be compared with a Grid North well plan.')
+    a,b,c,d=st.columns(4); az=a.number_input('Input azimuth (°)',0.,360.,0.); fr=b.selectbox('From reference',['Magnetic','True','Grid']); to=c.selectbox('To reference',['Magnetic','True','Grid']);
+    if d.button('Convert azimuth'):
         needs_dec=fr!=to and ('Magnetic' in (fr,to)); needs_conv=fr!=to and ('Grid' in (fr,to)); dec=r.get('D') if r.get('D') is not None else r.get('magnetic_declination_deg'); conv=project.get('reference_data',{}).get('grid_convergence_deg')
         if needs_dec and dec is None: st.error('Magnetic declination is not calculated. Run the selected geomagnetic model first.')
         elif needs_conv and conv is None: st.error('Grid convergence is not calculated. Run Geodesy first.')
         else:
-            dec=float(dec or 0); conv=float(conv or 0); out=az if fr==to else magnetic_to_true(az,dec) if (fr,to)==('Magnetic','True') else true_to_magnetic(az,dec) if (fr,to)==('True','Magnetic') else true_to_grid(az,conv) if (fr,to)==('True','Grid') else grid_to_true(az,conv) if (fr,to)==('Grid','True') else magnetic_to_grid(az,dec,conv) if (fr,to)==('Magnetic','Grid') else grid_to_magnetic(az,dec,conv); st.metric(f'{to} azimuth',f'{out:.4f}°')
+            dec=float(dec or 0); conv=float(conv or 0); out=az if fr==to else magnetic_to_true(az,dec) if (fr,to)==('Magnetic','True') else true_to_magnetic(az,dec) if (fr,to)==('True','Magnetic') else true_to_grid(az,conv) if (fr,to)==('True','Grid') else grid_to_true(az,conv) if (fr,to)==('Grid','True') else magnetic_to_grid(az,dec,conv) if (fr,to)==('Magnetic','Grid') else grid_to_magnetic(az,dec,conv); st.success(f'{az:.4f}° {fr} → **{out:.4f}° {to}**')
+            if fr!=to: st.write({'magnetic_declination_deg':dec if needs_dec else None,'grid_convergence_deg':conv if needs_conv else None,'input_reference':fr,'output_reference':to})
 
 # Geodesy
 elif page=='Geodesy':
@@ -449,22 +471,30 @@ elif page=='Geodesy':
         grav=normal_gravity(project['latitude'],project['elevation_m']); project['reference_data']['gravity_mps2']=grav; project['reference_data']['project_crs']=project['crs']
         st.metric('Grid convergence',f'{conv:.6f}°'); st.metric('Normal gravity',f'{grav:.9f} m/s²'); st.dataframe(pd.DataFrame([info]),use_container_width=True,hide_index=True)
     except Exception as e: st.error(str(e))
-    st.markdown('### Coordinate transformation')
-    src_default='EPSG:4326'; dst_default=project.get('crs','EPSG:4326')
+    st.markdown('### Automatic project-coordinate normalization')
+    st.caption('The normal planning workflow performs required coordinate transformations automatically. The project CRS is the authoritative spatial frame; users do not need to run a transformation manually before targets, offsets or anti-collision can be used.')
+    from pyproj import CRS
     try:
-        from pyproj import CRS
-        src_info=crs_info(src_default); dst_info=crs_info(dst_default)
-        x_default=float(project['longitude']); y_default=float(project['latitude'])
-        x_label='X / Longitude (°)'; y_label='Y / Latitude (°)'
-        if CRS.from_user_input(src_default).is_projected:
-            x_default=float(project.get('surface_easting_m',0)); y_default=float(project.get('surface_northing_m',0)); x_label='X / Easting (m)'; y_label='Y / Northing (m)'
-    except Exception:
-        x_default=float(project.get('surface_easting_m',0)); y_default=float(project.get('surface_northing_m',0)); x_label='X / Coordinate'; y_label='Y / Coordinate'
-    a,b,c,d=st.columns(4); x=a.number_input(x_label,-1e8,1e8,x_default); y=b.number_input(y_label,-1e8,1e8,y_default); src=c.text_input('Source CRS',src_default); dst=d.text_input('Target CRS',dst_default)
-    if st.button('Transform coordinates'):
+        project_crs=CRS.from_user_input(project.get('crs','EPSG:4326'))
+        if project_crs.is_projected:
+            ex=float(project.get('surface_easting_m',0)); ny=float(project.get('surface_northing_m',0))
+            st.success(f'Wellhead normalized to project CRS: **{project.get("crs")}** • Easting {ex:.3f} m ({ex*M_TO_FT:.2f} ft) • Northing {ny:.3f} m ({ny*M_TO_FT:.2f} ft)')
+        else:
+            st.info('The selected project CRS is geographic. Absolute project-grid calculations are unavailable until a projected CRS is selected.')
+    except Exception as e: st.error(f'Project CRS normalization error: {e}')
+    with st.expander('Advanced coordinate transformation utility'):
+        src_default='EPSG:4326'; dst_default=project.get('crs','EPSG:4326')
         try:
-            xx,yy=transform_coordinates(x,y,src,dst); st.success(f'Transformed X = {xx:.3f}, Y = {yy:.3f}'); st.write({'x':xx,'y':yy})
-        except Exception as e: st.error(str(e))
+            src_crs=CRS.from_user_input(src_default)
+            x_default=float(project['longitude']); y_default=float(project['latitude'])
+            x_label='Input X / Longitude (°)' if src_crs.is_geographic else 'Input X / Easting (native units)'; y_label='Input Y / Latitude (°)' if src_crs.is_geographic else 'Input Y / Northing (native units)'
+        except Exception:
+            x_default=float(project.get('surface_easting_m',0)); y_default=float(project.get('surface_northing_m',0)); x_label='Input X'; y_label='Input Y'
+        a,b,c,d=st.columns(4); x=a.number_input(x_label,-1e8,1e8,x_default); y=b.number_input(y_label,-1e8,1e8,y_default); src=c.text_input('Source CRS',src_default); dst=d.text_input('Target CRS',dst_default)
+        if st.button('Transform coordinates (advanced)'):
+            try:
+                xx,yy=transform_coordinates(x,y,src,dst); st.success(f'Transformed X = {xx:.3f}, Y = {yy:.3f}')
+            except Exception as e: st.error(str(e))
     st.caption('NOAA GEOID18 is a U.S./territory geoid service. It is not a global geoid model and is not applicable to this Nigeria training location.')
     if st.button('Query NOAA geoid service'):
         lat=float(project['latitude']); lon=float(project['longitude'])
@@ -477,22 +507,48 @@ elif page=='Geodesy':
 
 # Anti collision
 elif page=='Anti-Collision':
-    page_header('Anti-Collision Screening', 'DIRECTIONAL', 'Run the current screening workflow against stored offset trajectories and uncertainty assumptions.')
-    main=pd.DataFrame(project.get('surveys',[])); sigma=float(project['survey_metadata'].get('positional_sigma_m',0) or 0); off_sigma=st.number_input('Offset uncertainty sigma (ft)',0.,500.,sigma)
+    page_header('Anti-Collision Screening', 'DIRECTIONAL', 'Compare the current well trajectory with stored offset trajectories after normalizing all positions into the project reference frame.')
+    main=pd.DataFrame(project.get('surveys',[])); sigma_ft=float(project['survey_metadata'].get('positional_sigma_m',0) or 0)*M_TO_FT; off_sigma_ft=st.number_input('Offset uncertainty sigma (ft)',0.,500.,sigma_ft)
+    offsets=project.get('offsets',[]); valid_main=bool({'MD','Inc','Azi'}.issubset(main.columns)) and len(main)>=2
+    st.markdown('### Screening readiness')
+    checks=[{'Item':'Main trajectory','Status':'PASS' if valid_main else 'FAIL','Detail':f'{len(main)} stored stations' if valid_main else 'Need at least two valid survey stations.'},{'Item':'Offset wells','Status':'PASS' if offsets else 'WARN','Detail':f'{len(offsets)} offset well(s) stored.'},{'Item':'Project CRS','Status':'PASS' if project.get('crs') else 'FAIL','Detail':project.get('crs') or 'Missing project CRS.'},{'Item':'Uncertainty units','Status':'PASS','Detail':f'Main sigma {sigma_ft:.2f} ft; offset sigma {off_sigma_ft:.2f} ft; calculation converts to metres internally.'}]
+    st.dataframe(pd.DataFrame(checks),use_container_width=True,hide_index=True)
     if st.button('Run clearance scan',type='primary'):
-        try:
-            rep=clearance_report(main,project.get('offsets',[]),sigma,off_sigma); st.dataframe(rep,use_container_width=True,hide_index=True); st.caption('Screening only. A production anti-collision workflow requires a validated ISCWSA error model, covariance propagation and company-approved separation rules.')
-        except Exception as e: st.error(str(e))
+        if not valid_main: st.error('No valid main-well trajectory is available. Calculate a trajectory in Survey Manager or Trajectory Planner first.')
+        elif not offsets: st.warning('No offset wells are stored. Create/import offset trajectories before running anti-collision.')
+        else:
+            try:
+                rep=clearance_report(main,offsets,sigma_ft*FT_TO_M,off_sigma_ft*FT_TO_M)
+                if rep.empty: st.warning('No valid offset comparisons were produced. Check offset survey structure and project coordinates.')
+                else:
+                    disp=rep.copy()
+                    for col in ['main_md_m','offset_md_m','separation_m','horizontal_separation_m','vertical_separation_m','combined_uncertainty_m']:
+                        if col in disp: disp[col.replace('_m','_ft')]=disp[col]*M_TO_FT; disp.drop(columns=[col],inplace=True)
+                    disp=disp.rename(columns={'main_md_ft':'Main MD (ft)','offset_md_ft':'Offset MD (ft)','separation_ft':'Min separation (ft)','horizontal_separation_ft':'Horizontal separation (ft)','vertical_separation_ft':'Vertical separation (ft)','combined_uncertainty_ft':'Combined uncertainty (ft)','separation_factor':'Separation factor','status':'Status','offset':'Offset well'})
+                    st.dataframe(disp,use_container_width=True,hide_index=True)
+                    alerts=disp[disp['Status'].isin(['ALERT','WARNING'])]
+                    if len(alerts): st.warning(f'{len(alerts)} offset comparison(s) require review.')
+                    else: st.success('All valid offset comparisons meet the screening threshold.')
+                    st.caption('Screening only. Production anti-collision requires a validated ISCWSA error model, covariance propagation and company-approved separation rules.')
+            except Exception as e: st.error(f'Clearance scan failed: {e}')
 
 # Casing
 elif page=='Casing Design':
-    page_header('Casing Design & Well Integrity Screening', 'DRILLING ENGINEERING', 'Review the stored casing architecture and run the current burst, collapse and tension screening calculations.')
-    st.markdown('### Stored architecture');
-    if project['casing_program']: st.dataframe(pd.DataFrame(project['casing_program']),use_container_width=True,hide_index=True)
-    else: st.warning('Build the final casing program in Well Architecture first.')
-    st.markdown('### Design screen'); a,b,c,d,e,f=st.columns(6); od=a.number_input('OD (in)',2.,30.,9.625); wt=b.number_input('Weight (lb/ft)',5.,300.,47.); grade=c.number_input('Yield strength (psi)',10000.,250000.,80000.); shoe=d.number_input('Shoe MD (ft)',0.,20000.,2750.); mw=e.number_input('Mud weight (ppg)',5.,20.,10.); pore=f.number_input('Pore gradient (psi/ft)',.1,1.5,.5)
-    frac=st.number_input('Fracture gradient (psi/ft)',.1,2.,.65)
-    if st.button('Run casing design screen',type='primary'): st.dataframe(pd.DataFrame([casing_design_checks(od,wt,grade,shoe,mw,pore,frac)]),use_container_width=True,hide_index=True)
+    page_header('Casing Design & Well Integrity Screening', 'DRILLING ENGINEERING', 'Review the stored casing architecture and run transparent burst, collapse and tension screening against the selected string.')
+    pgr=project.get('casing_program',[])
+    if pgr:
+        st.markdown('### Stored architecture'); st.dataframe(pd.DataFrame(pgr),use_container_width=True,hide_index=True)
+        idx=st.selectbox('Casing string',range(len(pgr)),format_func=lambda i:f"{pgr[i].get('string_no')} • {pgr[i].get('type')} • {float(pgr[i].get('casing_od_in') or 0):g} in")
+        r=pgr[idx]
+    else:
+        st.warning('Build the final casing program in Well Architecture first.'); r={}
+    st.markdown('### Design screen')
+    a,b,c,d,e,f=st.columns(6); od=a.number_input('OD (in)',2.,30.,float(r.get('casing_od_in') or 9.625)); wt=b.number_input('Weight (lb/ft)',5.,300.,float(r.get('weight_lbft') or 47)); grade=c.number_input('Yield strength (psi)',10000.,250000.,80000.); shoe=d.number_input('Shoe MD (ft)',0.,20000.,float(r.get('shoe_md_m') or 2750)*M_TO_FT); mw=e.number_input('Mud weight (ppg)',5.,20.,10.); pore=f.number_input('Pore gradient (psi/ft)',.1,1.5,.5); frac=st.number_input('Fracture gradient (psi/ft)',.1,2.,.65)
+    if pgr and st.button('Use stored string assumptions'):
+        st.info('The selected architecture string is the authoritative geometry for this screen; edit assumptions only where a design scenario requires it.')
+    if st.button('Run casing design screen',type='primary'):
+        rcalc=casing_design_checks(od,wt,grade,shoe*FT_TO_M,mw,pore,frac); st.dataframe(pd.DataFrame([rcalc]),use_container_width=True,hide_index=True)
+        st.caption('Screening only. Final casing design requires certified tubular properties, connection ratings, applicable API/ISO criteria, temperature effects and company design factors.')
 
 # Hydraulics
 elif page=='Hydraulics & ECD':
@@ -518,13 +574,24 @@ elif page=='Torque & Drag':
 
 # Cement
 elif page=='Cementing':
-    page_header('Cementing Screening', 'DRILLING ENGINEERING', 'Estimate annular cement volume and slurry sacks from the stored casing geometry and selected assumptions.'); p=project.get('casing_program',[]); idx=st.selectbox('Casing string',range(len(p)),format_func=lambda i:f"{p[i].get('string_no')} • {p[i].get('type')}") if p else None; r=p[idx] if idx is not None else {}; a,b,c,d=st.columns(4); hole=a.number_input('Hole diameter (in)',2.,30.,float(r.get('hole_size_in') or 12.25)); od=b.number_input('Casing OD (in)',2.,30.,float(r.get('casing_od_in') or 9.625)); length_ft=c.number_input('Cement length (ft)',0.,65617.,max(1.,float(r.get('shoe_md_m') or 1000)-float(r.get('top_md_m') or 0))*M_TO_FT); length=length_ft*FT_TO_M; excess=d.number_input('Excess (%)',0.,100.,20.); yieldv=st.number_input('Slurry yield (bbl/sack)',.1,5.,1.18)
-    if st.button('Calculate cement screen',type='primary'): st.dataframe(pd.DataFrame([cement_screen(hole,od,length,excess,yieldv)]),use_container_width=True,hide_index=True)
+    page_header('Cementing Screening', 'DRILLING ENGINEERING', 'Estimate annular cement volume and slurry sacks using an explicit top-of-cement and casing-shoe interval.')
+    p=project.get('casing_program',[]); idx=st.selectbox('Casing string',range(len(p)),format_func=lambda i:f"{p[i].get('string_no')} • {p[i].get('type')}") if p else None; r=p[idx] if idx is not None else {}
+    a,b,c,d=st.columns(4); hole=a.number_input('Hole diameter (in)',2.,30.,float(r.get('hole_size_in') or 12.25)); od=b.number_input('Casing OD (in)',2.,30.,float(r.get('casing_od_in') or 9.625)); shoe_ft=c.number_input('Casing shoe MD (ft)',0.,65617.,float(r.get('shoe_md_m') or 1000)*M_TO_FT); toc_ft=d.number_input('Top of cement MD (ft)',0.,65617.,float(r.get('top_md_m') or 0)*M_TO_FT)
+    a,b=st.columns(2); excess=a.number_input('Excess (%)',0.,100.,20.); yieldv=b.number_input('Slurry yield (bbl/sack)',.1,5.,1.18)
+    if toc_ft>=shoe_ft: st.error('Top of cement must be shallower than the casing shoe.')
+    length_ft=max(0.0,shoe_ft-toc_ft); st.metric('Cemented interval',f'{length_ft:,.1f} ft')
+    if st.button('Calculate cement screen',type='primary') and toc_ft<shoe_ft:
+        length=length_ft*FT_TO_M; rcalc=cement_screen(hole,od,length,excess,yieldv); rcalc.update({'shoe_md_ft':shoe_ft,'top_of_cement_md_ft':toc_ft,'cement_length_ft':length_ft}); st.dataframe(pd.DataFrame([rcalc]),use_container_width=True,hide_index=True)
+        st.caption('Screening volume only; final cement design requires slurry properties, centralization, displacement, losses, contamination, temperature/pressure and approved cementing procedures.')
 
 # Well control
 elif page=='Well Control':
-    page_header('Well Control Screening', 'DRILLING ENGINEERING', 'Review basic kick/kill screening quantities; operational well control remains governed by approved procedures.'); a,b,c,d=st.columns(4); sid=a.number_input('SIDPP (psi)',0.,10000.,500.); tvd=b.number_input('TVD (ft)',100.,50000.,10000.); mw=c.number_input('Current MW (ppg)',5.,20.,10.); maasp=d.number_input('Allowable surface pressure (psi)',0.,20000.,1500.); fg=st.number_input('Fracture gradient (psi/ft)',0.,2.,.65)
-    if st.button('Run well-control screen',type='primary'): st.dataframe(pd.DataFrame([well_control_screen(sid,tvd,mw,maasp,fg)]),use_container_width=True,hide_index=True); st.warning('Operational well control must follow approved company procedures.')
+    page_header('Well Control Screening', 'DRILLING ENGINEERING', 'Review basic kick/kill screening quantities and their relationship to formation pressure and MAASP.')
+    a,b,c,d=st.columns(4); sid=a.number_input('SIDPP (psi)',0.,10000.,500.); sicp=b.number_input('SICP (psi)',0.,10000.,500.); tvd=c.number_input('TVD (ft)',100.,50000.,10000.); mw=d.number_input('Current MW (ppg)',5.,20.,10.)
+    a,b=st.columns(2); maasp=a.number_input('Allowable surface pressure (psi)',0.,20000.,1500.); fg=b.number_input('Fracture gradient (psi/ft)',0.,2.,.65)
+    if st.button('Run well-control screen',type='primary'):
+        r=well_control_screen(sid,tvd,mw,maasp,fg); r['SICP_psi']=sicp; r['SIDPP_SICP_difference_psi']=sid-sicp; st.dataframe(pd.DataFrame([r]),use_container_width=True,hide_index=True)
+        st.info('SIDPP is used for the basic kill-MW estimate in this screening engine. SICP is displayed for comparison; operational kill calculations must follow approved company procedures and kill sheets.')
 
 # BHA
 elif page=='BHA & Drilling':
@@ -585,11 +652,18 @@ elif page=='Visualization':
 
 # QA/QC
 elif page=='QA/QC':
-    page_header('Integrated QA/QC', 'OUTPUTS', 'Review project-level checks and geometry/survey statistics before treating the plan as complete.'); results=validate_project(project); st.dataframe(pd.DataFrame(results),use_container_width=True,hide_index=True)
-    if project.get('casing_program'): st.markdown('### Casing geometry'); st.dataframe(pd.DataFrame(casing_geometry_checks(project['casing_program'])),use_container_width=True,hide_index=True)
-    st.markdown('### Survey statistics'); s=pd.DataFrame(project.get('surveys',[]));
+    page_header('Integrated QA/QC', 'OUTPUTS', 'Review reference, survey, trajectory, target, offset and casing checks before treating the plan as complete.')
+    results=validate_project(project)
+    s=pd.DataFrame(project.get('surveys',[])); dc=project.get('design_constraints',{}); extra=[]
     if not s.empty:
-        interval_m=float(project.get('trajectory_metadata',{}).get('dls_interval_m',30.0) or 30.0); max_dls_100=dls_for_interval_to_100ft(float(s.get('DLS',pd.Series([0])).max()),interval_m); st.write({'MD min':float(s.MD.min()),'MD max':float(s.MD.max()),'max inclination':float(s.Inc.max()),'max DLS (°/100 ft)':max_dls_100})
+        interval_m=float(project.get('trajectory_metadata',{}).get('dls_interval_m',30.0) or 30.0); max_dls_100=dls_for_interval_to_100ft(float(s.get('DLS',pd.Series([0])).max()),interval_m); max_inc=float(s.Inc.max()); max_inc_allowed=float(dc.get('max_inclination_deg',180)); max_dls_allowed=dls_30m_to_100ft(float(dc.get('max_dls_deg_30m',999)))
+        extra += [{'check':'Max inclination constraint','status':'PASS' if max_inc<=max_inc_allowed+1e-6 else 'FAIL','message':f'Max {max_inc:.2f}° vs limit {max_inc_allowed:.2f}°.'},{'check':'Max DLS constraint','status':'PASS' if max_dls_100<=max_dls_allowed+1e-6 else 'FAIL','message':f'Max {max_dls_100:.2f}°/100ft vs limit {max_dls_allowed:.2f}°/100ft.'}]
+    meta=project.get('trajectory_metadata',{}).get('planner_result',{})
+    if meta:
+        laterr=float(meta.get('lateral_error_m',0))*M_TO_FT; tvderr=abs(float(meta.get('tvd_error_m',0)))*M_TO_FT; extra += [{'check':'Trajectory target lateral error','status':'PASS' if laterr<=100 else 'WARN','message':f'{laterr:.1f} ft.'},{'check':'Trajectory target TVD error','status':'PASS' if tvderr<=100 else 'WARN','message':f'{tvderr:.1f} ft.'}]
+    results.extend(extra); st.dataframe(pd.DataFrame(results),use_container_width=True,hide_index=True)
+    if project.get('casing_program'): st.markdown('### Casing geometry'); st.dataframe(pd.DataFrame(casing_geometry_checks(project['casing_program'])),use_container_width=True,hide_index=True)
+    if not s.empty: st.markdown('### Survey statistics'); st.write({'MD min (ft)':float(s.MD.min())*M_TO_FT,'MD max (ft)':float(s.MD.max())*M_TO_FT,'max inclination (°)':float(s.Inc.max()),'max DLS (°/100 ft)':dls_for_interval_to_100ft(float(s.get('DLS',pd.Series([0])).max()),float(project.get('trajectory_metadata',{}).get('dls_interval_m',30.0)))})
 
 # Reports
 elif page=='Reports':

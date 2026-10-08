@@ -112,3 +112,7 @@ Contributions are welcome. New engineering calculations should include:
 ## License
 
 MIT. See `LICENSE`.
+
+## v6.0 engineering workflow upgrade
+
+The platform now treats the project CRS as the authoritative spatial frame for planning. Required coordinate normalization is automatic; the manual coordinate transformer is retained only as an advanced utility. The trajectory planner includes a transparent target-fit hold-angle search bounded by the project maximum inclination, and anti-collision screening now reports readiness and minimum 3D separation by offset well while keeping field-unit display and metre-based internal calculations consistent.

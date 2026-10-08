@@ -39,3 +39,16 @@
 - Added integrated visualization for plan, vertical section and 3D views.
 - Added stronger project QA/QC and report export.
 - Clarified screening versus validated engineering status throughout the product.
+
+## v6.0 — Integrated planning/reference upgrade
+
+- Added target-fit hold-inclination solving to the constant build/hold planner, bounded by the project maximum inclination.
+- Added trajectory planning diagnostics for EOB, build length, final MD, hold margin and target-reference azimuth mismatch.
+- Normalized anti-collision uncertainty units (field-unit UI, metre internal calculations) and added readiness diagnostics.
+- Upgraded anti-collision screening to accept raw survey offsets, calculate positional trajectories automatically, and search pairwise minimum 3D separation with separate main/offset MD values.
+- Added automatic offset surface-coordinate transformation from WGS84 lat/lon into the authoritative project CRS.
+- Made manual coordinate transformation an advanced utility while keeping required project normalization automatic.
+- Clarified the geomagnetic north-reference converter and displayed the correction inputs used.
+- Added casing-string selection and cement top-of-cement interval workflow.
+- Expanded well-control screening display with SICP comparison.
+- Expanded QA/QC with inclination/DLS constraint checks, trajectory target-error checks and offset readiness.
