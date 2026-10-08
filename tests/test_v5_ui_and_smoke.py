@@ -111,3 +111,14 @@ def test_target_fit_hold_solver_respects_max_inclination():
     assert meta['hold_inclination_deg'] <= 57.0 + 1e-9
     assert meta['hold_inclination_deg'] > 0
     assert meta['final_md_m'] == out.iloc[-1]['MD']
+
+
+def test_anti_collision_translates_main_and_offset_into_common_project_frame():
+    import pandas as pd
+    from engineering.anti_collision import clearance_report
+    # Identical local trajectories, but offset wellhead is 100 m east of main wellhead.
+    main=pd.DataFrame([{'MD':0,'Inc':0,'Azi':0},{'MD':1000,'Inc':0,'Azi':0},{'MD':2000,'Inc':0,'Azi':0}])
+    offsets=[{'name':'OW-01','surface_easting_m':1100,'surface_northing_m':2000,'surveys':[{'MD':0,'Inc':0,'Azi':0},{'MD':1000,'Inc':0,'Azi':0},{'MD':2000,'Inc':0,'Azi':0}]}]
+    rep=clearance_report(main,offsets,1.0,1.0,main_surface_easting_m=1000,main_surface_northing_m=2000)
+    assert len(rep)==1
+    assert abs(float(rep.iloc[0]['separation_m'])-100.0) < 1.0
