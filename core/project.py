@@ -158,8 +158,16 @@ def validate_project(p):
         except: checks.append({'check':'Survey numeric values','status':'FAIL','message':'Non-numeric survey value detected.'})
     else: checks.append({'check':'Survey data','status':'WARN','message':'No survey loaded.'})
     ref=p.get('reference_data',{}); checks.append({'check':'North-reference data','status':'PASS' if ref.get('grid_convergence_deg') is not None or ref.get('magnetic_declination_deg') is not None else 'WARN','message':'Reference corrections available.' if ref.get('grid_convergence_deg') is not None or ref.get('magnetic_declination_deg') is not None else 'Calculate reference corrections.'})
-    checks.append({'check':'Targets','status':'PASS' if p.get('targets') else 'WARN','message':f"{len(p.get('targets',[]))} target(s) defined."})
-    checks.append({'check':'Offsets','status':'PASS' if p.get('offsets') else 'WARN','message':f"{len(p.get('offsets',[]))} offset(s) defined."})
+    try:
+        from pyproj import CRS
+        projected=CRS.from_user_input(p.get('crs','EPSG:4326')).is_projected
+        checks.append({'check':'Projected engineering CRS','status':'PASS' if projected else 'WARN','message':'Project CRS is projected and suitable for grid-based target/offset work.' if projected else 'Geographic CRS selected; use a projected CRS for absolute grid calculations.'})
+    except Exception: pass
+    targets=p.get('targets',[]); checks.append({'check':'Targets','status':'PASS' if targets else 'WARN','message':f"{len(targets)} target(s) defined."})
+    offsets=p.get('offsets',[]); checks.append({'check':'Offsets','status':'PASS' if offsets else 'WARN','message':f"{len(offsets)} offset(s) defined."})
+    if offsets:
+        usable=sum(1 for o in offsets if o.get('surface_easting_m') is not None and o.get('surface_northing_m') is not None and len(o.get('surveys',[]))>=2)
+        checks.append({'check':'Offset trajectory readiness','status':'PASS' if usable==len(offsets) else 'WARN','message':f'{usable}/{len(offsets)} offsets have surface coordinates and at least two survey stations.'})
     checks.append({'check':'Casing architecture','status':'PASS' if p.get('casing_program') else 'WARN','message':'Final casing program stored.' if p.get('casing_program') else 'No casing program stored.'})
     checks.append({'check':'Model provenance','status':'PASS' if p.get('model_metadata') else 'WARN','message':'Model provenance recorded.' if p.get('model_metadata') else 'No model provenance recorded.'})
     return checks
