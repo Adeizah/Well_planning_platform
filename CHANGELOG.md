@@ -52,3 +52,13 @@
 - Added casing-string selection and cement top-of-cement interval workflow.
 - Expanded well-control screening display with SICP comparison.
 - Expanded QA/QC with inclination/DLS constraint checks, trajectory target-error checks and offset readiness.
+
+## v6.2 — Covariance-Based Anti-Collision Upgrade
+
+- Replaced the scalar anti-collision sigma workflow with a transparent covariance-based survey uncertainty model.
+- Added independent station measurement errors plus correlated systematic inclination/azimuth bias and surface-position uncertainty.
+- Propagated 3D North/East/TVD covariance to survey stations and exposed 1-sigma horizontal ellipse summaries.
+- Updated Survey Manager to calculate/store the covariance profile with the trajectory.
+- Updated Anti-Collision to compare trajectories in a common project frame and assess separation using directional relative uncertainty.
+- Updated plan visualization to display stationwise 1-sigma uncertainty ellipses and keep main/offset wells in a common relative plotting frame.
+- Explicitly labels the implementation as engineering-development screening, not an ISCWSA-certified error model.

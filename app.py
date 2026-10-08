@@ -13,6 +13,7 @@ from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to
 from models.geomagnetic import wmm2025, igrf14
 from models.geodesy import crs_info, transform_coordinates, grid_convergence_deg, normal_gravity, noaa_geoid_height
 from engineering.anti_collision import clearance_report
+from models.survey_uncertainty import station_covariances
 from engineering.casing import casing_screen, casing_program_summary, casing_geometry_checks, casing_design_checks
 from engineering.hydraulics import hydraulic_screen, rheology_summary
 from engineering.well_control import well_control_screen
@@ -274,8 +275,8 @@ elif page=='Survey Manager':
     page_header('Survey Manager', 'DIRECTIONAL', 'Load, normalize and calculate survey trajectories while preserving the selected azimuth reference and uncertainty assumptions.')
     sm=project['survey_metadata']; ref=project['reference_data']
     req=reference_requirements(project.get('north_reference','Grid North')); st.info(f"**Primary reference: {req['reference']}** — {req['label']}")
-    a,b,c,d=st.columns(4); sm['azimuth_reference']=a.selectbox('Input azimuth reference',['Magnetic North','True North','Grid North'],index=['Magnetic North','True North','Grid North'].index(sm['azimuth_reference'])); sm['survey_tool']=b.selectbox('Survey tool',['MWD','Gyro','Wireline','Planned','Other']); sm['survey_method']=c.selectbox('Calculation method',['Minimum Curvature','Average Angle','Balanced Tangential']); sm['positional_sigma_m']=d.number_input('Screening sigma (ft)',0.,1640.,float(sm.get('positional_sigma_m',0))*M_TO_FT)/M_TO_FT
-    st.caption('Screening uncertainty only. Full ISCWSA covariance/tool-error models remain an engineering-validation task.')
+    a,b,c=st.columns(3); sm['azimuth_reference']=a.selectbox('Input azimuth reference',['Magnetic North','True North','Grid North'],index=['Magnetic North','True North','Grid North'].index(sm['azimuth_reference'])); sm['survey_tool']=b.selectbox('Survey tool',['MWD','Gyro','Wireline','Planned','Other']); sm['survey_method']=c.selectbox('Calculation method',['Minimum Curvature','Average Angle','Balanced Tangential'])
+    st.caption('Survey position uncertainty is now represented by a covariance-based development model. Configure the survey error parameters on the Anti-Collision page; a legacy scalar sigma remains in the project schema only for backward compatibility.')
     df=pd.DataFrame(project.get('surveys',[])); display_df=(df.copy() if not df.empty else pd.DataFrame([{'MD':0.,'Inc':0.,'Azi':0.}]))
     if 'MD' in display_df.columns: display_df['MD']=display_df['MD']*M_TO_FT
     edited=st.data_editor(display_df,num_rows='dynamic',use_container_width=True,hide_index=True,key='survey_editor')
@@ -290,7 +291,11 @@ elif page=='Survey Manager':
                 raise ValueError('Grid convergence is not calculated. Run Geodesy before converting survey azimuths to Grid North.')
             w['Azi']=w['Azi'].map(lambda x: convert_to_project_reference(x, sm['azimuth_reference'], project.get('north_reference','Grid North'), float(dec or 0), float(conv or 0)))
             result=minimum_curvature(w,interval); result['TVDSS']=float(project.get('kb_m',0))-result['TVD']
-            project['surveys']=result.to_dict('records'); project['trajectory_metadata']={'method':sm['survey_method'],'dls_interval_m':interval,'dls_interval_ft':interval_ft,'calculated_utc':datetime.utcnow().isoformat()+'Z'}; save(); st.success('Trajectory calculated and stored.')
+            uparams=sm.setdefault('survey_error_parameters', {'sigma_md_ft':0.5,'sigma_inc_deg':0.10,'sigma_azi_deg':0.25,'sigma_inc_systematic_deg':0.10,'sigma_azi_systematic_deg':0.25,'sigma_surface_ft':5.0})
+            cov=station_covariances(w, **uparams)
+            for col in [c for c in cov.columns if c.startswith('Cov_') or c.startswith('Unc_')]: result[col]=cov[col].to_numpy()
+            sm['uncertainty_model']='Covariance-based stationwise screening (engineering-development)'
+            project['surveys']=result.to_dict('records'); project['trajectory_metadata']={'method':sm['survey_method'],'dls_interval_m':interval,'dls_interval_ft':interval_ft,'uncertainty_model':'Covariance-based stationwise screening (engineering-development)','calculated_utc':datetime.utcnow().isoformat()+'Z'}; save(); st.success('Trajectory and covariance profile calculated and stored.')
         except Exception as e: st.error(str(e))
     if project.get('surveys'):
         sv=pd.DataFrame(project['surveys']).copy()
@@ -299,7 +304,17 @@ elif page=='Survey Manager':
         if 'DLS' in sv.columns:
             stored_interval=float(project.get('trajectory_metadata',{}).get('dls_interval_m',30.0))
             sv['DLS']=sv['DLS'].map(lambda x: dls_for_interval_to_100ft(x, stored_interval))
-        st.dataframe(sv,use_container_width=True,hide_index=True)
+        cov_cols=[c for c in sv.columns if c.startswith('Cov_')]
+        uncertainty_cols=[c for c in sv.columns if c.startswith('Unc_')]
+        display_cols=[c for c in sv.columns if c not in cov_cols+uncertainty_cols]
+        st.dataframe(sv[display_cols],use_container_width=True,hide_index=True)
+        if {'Unc_major_1sigma_m','Unc_minor_1sigma_m','Unc_vertical_1sigma_m'}.issubset(project.get('surveys',[{}])[-1].keys()):
+            last=project['surveys'][-1]
+            st.info(f"End-of-survey 1σ uncertainty: major {float(last['Unc_major_1sigma_m'])*M_TO_FT:.1f} ft • minor {float(last['Unc_minor_1sigma_m'])*M_TO_FT:.1f} ft • vertical {float(last['Unc_vertical_1sigma_m'])*M_TO_FT:.1f} ft • ellipse azimuth {float(last['Unc_azimuth_deg']):.1f}° Grid")
+            with st.expander('Covariance / uncertainty details'):
+                uview=sv[['MD']+[c for c in uncertainty_cols if c in sv.columns]].copy()
+                st.dataframe(uview,use_container_width=True,hide_index=True)
+                st.caption('The stored covariance fields are in m²; the summary above is displayed in field units. The uncertainty model is an engineering-development model, not an ISCWSA-certified error model.')
     f=st.file_uploader('Import survey CSV (MD, Inc, Azi) — MD interpreted as ft',type='csv',key='survey_upload')
     if f:
         imp=pd.read_csv(f); st.dataframe(imp.head(),use_container_width=True)
@@ -400,7 +415,7 @@ elif page=='Offsets':
             ed=st.data_editor(od_display,num_rows='dynamic',key=f'off{i}',use_container_width=True)
             if st.button(f'Save {off.get("name")}',key=f'saveoff{i}'):
                 try:
-                    ed_calc=ed[['MD','Inc','Azi']].copy(); ed_calc['MD']=ed_calc['MD']*FT_TO_M; off['surveys']=minimum_curvature(ed_calc).to_dict('records'); off['crs']=project.get('crs'); off['north_reference']=project.get('north_reference','Grid North'); save(); st.success('Saved offset trajectory.')
+                    ed_calc=ed[['MD','Inc','Azi']].copy(); ed_calc['MD']=ed_calc['MD']*FT_TO_M; off_result=minimum_curvature(ed_calc); uparams=project.get('survey_metadata',{}).get('survey_error_parameters', {'sigma_md_ft':0.5,'sigma_inc_deg':0.10,'sigma_azi_deg':0.25,'sigma_inc_systematic_deg':0.10,'sigma_azi_systematic_deg':0.25,'sigma_surface_ft':5.0}); cov=station_covariances(ed_calc, **uparams); [off_result.__setitem__(col,cov[col].to_numpy()) for col in cov.columns if col.startswith('Cov_') or col.startswith('Unc_')]; off['surveys']=off_result.to_dict('records'); off['crs']=project.get('crs'); off['north_reference']=project.get('north_reference','Grid North'); save(); st.success('Saved offset trajectory and covariance profile.')
                 except Exception as ex: st.error(str(ex))
     if project['offsets']:
         main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0)); rows=[]
@@ -507,30 +522,53 @@ elif page=='Geodesy':
 
 # Anti collision
 elif page=='Anti-Collision':
-    page_header('Anti-Collision Screening', 'DIRECTIONAL', 'Compare the current well trajectory with stored offset trajectories after normalizing all positions into the project reference frame.')
-    main=pd.DataFrame(project.get('surveys',[])); sigma_ft=float(project['survey_metadata'].get('positional_sigma_m',0) or 0)*M_TO_FT; off_sigma_ft=st.number_input('Offset uncertainty sigma (ft)',0.,500.,sigma_ft)
-    offsets=project.get('offsets',[]); valid_main=bool({'MD','Inc','Azi'}.issubset(main.columns)) and len(main)>=2
+    page_header('Anti-Collision Screening', 'DIRECTIONAL', 'Compare the current well trajectory with stored offset trajectories using stationwise covariance-based position uncertainty.')
+    main=pd.DataFrame(project.get('surveys',[]))
+    offsets=project.get('offsets',[])
+    valid_main=bool({'MD','Inc','Azi'}.issubset(main.columns)) and len(main)>=2
+    params=project.setdefault('survey_metadata',{}).setdefault('survey_error_parameters', {'sigma_md_ft':0.5,'sigma_inc_deg':0.10,'sigma_azi_deg':0.25,'sigma_inc_systematic_deg':0.10,'sigma_azi_systematic_deg':0.25,'sigma_surface_ft':5.0})
+    st.markdown('### Survey uncertainty model')
+    st.info('Covariance-based engineering-development screening. The model propagates illustrative MD, inclination and azimuth measurement errors into a 3D position covariance at each survey station. It is **not** an ISCWSA-certified error model.')
+    a,b,c=st.columns(3)
+    sigma_md_ft=a.number_input('Random MD σ (ft)',0.0,100.0,float(params.get('sigma_md_ft',0.5)),step=0.1,help='Illustrative independent MD standard deviation at each station.')
+    sigma_inc_deg=b.number_input('Random inclination σ (°)',0.0,5.0,float(params.get('sigma_inc_deg',0.10)),step=0.01,help='Illustrative independent inclination standard deviation at each station.')
+    sigma_azi_deg=c.number_input('Random azimuth σ (°)',0.0,10.0,float(params.get('sigma_azi_deg',0.25)),step=0.05,help='Illustrative independent azimuth standard deviation at each station.')
+    a,b,c=st.columns(3)
+    sigma_inc_sys=a.number_input('Systematic inclination σ (°)',0.0,5.0,float(params.get('sigma_inc_systematic_deg',0.10)),step=0.01,help='Illustrative correlated inclination bias applied coherently along the trajectory.')
+    sigma_azi_sys=b.number_input('Systematic azimuth σ (°)',0.0,10.0,float(params.get('sigma_azi_systematic_deg',0.25)),step=0.05,help='Illustrative correlated azimuth bias applied coherently along the trajectory.')
+    sigma_surface_ft=c.number_input('Surface position σ (ft)',0.0,100.0,float(params.get('sigma_surface_ft',5.0)),step=0.5,help='Illustrative 1-sigma surface-position uncertainty. A production workflow should derive this from the wellhead positioning/reference survey.')
+    params.update({'sigma_md_ft':sigma_md_ft,'sigma_inc_deg':sigma_inc_deg,'sigma_azi_deg':sigma_azi_deg,'sigma_inc_systematic_deg':sigma_inc_sys,'sigma_azi_systematic_deg':sigma_azi_sys,'sigma_surface_ft':sigma_surface_ft})
+    st.caption('The model combines independent station errors with correlated systematic inclination/azimuth biases and a surface-position covariance. It produces stationwise 3D covariance/uncertainty ellipses, but remains an engineering-development model rather than an ISCWSA error model.')
     st.markdown('### Screening readiness')
-    checks=[{'Item':'Main trajectory','Status':'PASS' if valid_main else 'FAIL','Detail':f'{len(main)} stored stations' if valid_main else 'Need at least two valid survey stations.'},{'Item':'Offset wells','Status':'PASS' if offsets else 'WARN','Detail':f'{len(offsets)} offset well(s) stored.'},{'Item':'Project CRS','Status':'PASS' if project.get('crs') else 'FAIL','Detail':project.get('crs') or 'Missing project CRS.'},{'Item':'Uncertainty units','Status':'PASS','Detail':f'Main sigma {sigma_ft:.2f} ft; offset sigma {off_sigma_ft:.2f} ft; calculation converts to metres internally.'}]
+    checks=[
+        {'Item':'Main trajectory','Status':'PASS' if valid_main else 'FAIL','Detail':f'{len(main)} stored stations' if valid_main else 'Need at least two valid survey stations.'},
+        {'Item':'Offset wells','Status':'PASS' if offsets else 'WARN','Detail':f'{len(offsets)} offset well(s) stored.'},
+        {'Item':'Project CRS','Status':'PASS' if project.get('crs') else 'FAIL','Detail':project.get('crs') or 'Missing project CRS.'},
+        {'Item':'Uncertainty model','Status':'PASS' if max(sigma_md_ft,sigma_inc_deg,sigma_azi_deg,sigma_inc_sys,sigma_azi_sys,sigma_surface_ft)>0 else 'FAIL','Detail':f'Random: MD {sigma_md_ft:.2f} ft • Inc {sigma_inc_deg:.2f}° • Azi {sigma_azi_deg:.2f}°; systematic: Inc {sigma_inc_sys:.2f}° • Azi {sigma_azi_sys:.2f}°; surface {sigma_surface_ft:.1f} ft'},
+    ]
     st.dataframe(pd.DataFrame(checks),use_container_width=True,hide_index=True)
-    if st.button('Run clearance scan',type='primary'):
+    if st.button('Run covariance clearance scan',type='primary'):
         if not valid_main: st.error('No valid main-well trajectory is available. Calculate a trajectory in Survey Manager or Trajectory Planner first.')
         elif not offsets: st.warning('No offset wells are stored. Create/import offset trajectories before running anti-collision.')
+        elif max(sigma_md_ft,sigma_inc_deg,sigma_azi_deg,sigma_inc_sys,sigma_azi_sys,sigma_surface_ft)<=0: st.error('At least one non-zero survey uncertainty parameter is required.')
         else:
             try:
-                rep=clearance_report(main,offsets,sigma_ft*FT_TO_M,off_sigma_ft*FT_TO_M)
+                rep=clearance_report(main,offsets,
+                    survey_error_model={'sigma_md_ft':sigma_md_ft,'sigma_inc_deg':sigma_inc_deg,'sigma_azi_deg':sigma_azi_deg,'sigma_inc_systematic_deg':sigma_inc_sys,'sigma_azi_systematic_deg':sigma_azi_sys,'sigma_surface_ft':sigma_surface_ft},
+                    main_surface_easting_m=float(project.get('surface_easting_m',0.0) or 0.0),
+                    main_surface_northing_m=float(project.get('surface_northing_m',0.0) or 0.0))
                 if rep.empty: st.warning('No valid offset comparisons were produced. Check offset survey structure and project coordinates.')
                 else:
                     disp=rep.copy()
-                    for col in ['main_md_m','offset_md_m','separation_m','horizontal_separation_m','vertical_separation_m','combined_uncertainty_m']:
+                    for col in ['main_md_m','offset_md_m','separation_m','horizontal_separation_m','vertical_separation_m','directional_uncertainty_m']:
                         if col in disp: disp[col.replace('_m','_ft')]=disp[col]*M_TO_FT; disp.drop(columns=[col],inplace=True)
-                    disp=disp.rename(columns={'main_md_ft':'Main MD (ft)','offset_md_ft':'Offset MD (ft)','separation_ft':'Min separation (ft)','horizontal_separation_ft':'Horizontal separation (ft)','vertical_separation_ft':'Vertical separation (ft)','combined_uncertainty_ft':'Combined uncertainty (ft)','separation_factor':'Separation factor','status':'Status','offset':'Offset well'})
+                    disp=disp.rename(columns={'main_md_ft':'Main MD (ft)','offset_md_ft':'Offset MD (ft)','separation_ft':'Min separation (ft)','horizontal_separation_ft':'Horizontal separation (ft)','vertical_separation_ft':'Vertical separation (ft)','directional_uncertainty_ft':'Directional 1σ uncertainty (ft)','separation_factor':'Separation factor','status':'Status','offset':'Offset well'})
                     st.dataframe(disp,use_container_width=True,hide_index=True)
                     alerts=disp[disp['Status'].isin(['ALERT','WARNING'])]
                     if len(alerts): st.warning(f'{len(alerts)} offset comparison(s) require review.')
-                    else: st.success('All valid offset comparisons meet the screening threshold.')
+                    else: st.success('All valid offset comparisons meet the illustrative covariance screening threshold.')
                     st.caption('Screening only. Production anti-collision requires a validated ISCWSA error model, covariance propagation and company-approved separation rules.')
-            except Exception as e: st.error(f'Clearance scan failed: {e}')
+            except Exception as e: st.error(f'Covariance clearance scan failed: {e}')
 
 # Casing
 elif page=='Casing Design':
@@ -619,23 +657,32 @@ elif page=='Visualization':
         view=st.selectbox('View',['Plan','Vertical Section','3D']); show_unc=st.checkbox('Show screening uncertainty',True); show_targets=st.checkbox('Show targets',True); show_offsets=st.checkbox('Show offsets',True)
         fig=go.Figure()
         if view=='Plan':
+            main_e=float(project.get('surface_easting_m',0.0) or 0.0); main_n=float(project.get('surface_northing_m',0.0) or 0.0)
             fig.add_trace(go.Scatter(x=main['Easting']*M_TO_FT,y=main['Northing']*M_TO_FT,mode='lines+markers',name=project['well_name'],text=[f"MD {x*M_TO_FT:.0f} ft" for x in main['MD']],hovertemplate='%{text}<extra></extra>'))
             if show_offsets:
                 for off in project.get('offsets',[]):
                     od=pd.DataFrame(off.get('surveys',[]));
                     if {'Easting','Northing'}.issubset(od.columns):
-                        oe=float(off.get('surface_easting_m',0)); on=float(off.get('surface_northing_m',0)); fig.add_trace(go.Scatter(x=(od.Easting+oe)*M_TO_FT,y=(od.Northing+on)*M_TO_FT,mode='lines',name=off.get('name','Offset')))
+                        oe=float(off.get('surface_easting_m',0)); on=float(off.get('surface_northing_m',0)); fig.add_trace(go.Scatter(x=(od.Easting+oe-main_e)*M_TO_FT,y=(od.Northing+on-main_n)*M_TO_FT,mode='lines',name=off.get('name','Offset')))
             if show_targets:
                 for t in project.get('targets',[]):
-                    rt=dict(t); rt['north_m']=float(t.get('north_m',0))-float(project.get('surface_northing_m',0)); rt['east_m']=float(t.get('east_m',0))-float(project.get('surface_easting_m',0)); n,e=target_boundary(rt); fig.add_trace(go.Scatter(x=e*M_TO_FT,y=n*M_TO_FT,mode='lines+markers',name=t.get('name','Target'),line=dict(dash='dash')))
+                    rt=dict(t); rt['north_m']=float(t.get('north_m',0))-main_n; rt['east_m']=float(t.get('east_m',0))-main_e; n,e=target_boundary(rt); fig.add_trace(go.Scatter(x=e*M_TO_FT,y=n*M_TO_FT,mode='lines+markers',name=t.get('name','Target'),line=dict(dash='dash')))
             if show_unc:
-                sig=float(project['survey_metadata'].get('positional_sigma_m',0) or 0)
-                if sig>0:
-                    a=np.linspace(0,2*np.pi,72); x=(float(main.iloc[-1].Easting)+sig*np.cos(a))*M_TO_FT; y=(float(main.iloc[-1].Northing)+sig*np.sin(a))*M_TO_FT; fig.add_trace(go.Scatter(x=x,y=y,mode='lines',name='Screening uncertainty'))
-            fig.update_layout(xaxis_title='Easting (ft)',yaxis_title='Northing (ft)',height=700)
+                try:
+                    cov=station_covariances(main[['MD','Inc','Azi']].copy(), **project.get('survey_metadata',{}).get('survey_error_parameters',{}))
+                    idxs=np.linspace(0,len(main)-1,min(8,len(main)),dtype=int)
+                    theta=np.linspace(0,2*np.pi,72)
+                    for k,idx in enumerate(idxs):
+                        r=cov.iloc[idx]; maj=float(r['Unc_major_1sigma_m']); minr=float(r['Unc_minor_1sigma_m']); alpha=np.radians(float(r['Unc_azimuth_deg']))
+                        tt=theta; dn=maj*np.cos(tt)*np.cos(alpha)-minr*np.sin(tt)*np.sin(alpha); de=maj*np.cos(tt)*np.sin(alpha)+minr*np.sin(tt)*np.cos(alpha)
+                        fig.add_trace(go.Scatter(x=(float(main.iloc[idx].Easting)+de)*M_TO_FT,y=(float(main.iloc[idx].Northing)+dn)*M_TO_FT,mode='lines',name='1σ uncertainty' if k==0 else None,showlegend=(k==0),hoverinfo='skip'))
+                except Exception as ex:
+                    st.warning(f'Uncertainty ellipses could not be generated: {ex}')
+            fig.update_layout(xaxis_title='Relative Easting (ft)',yaxis_title='Relative Northing (ft)',height=700)
         elif view=='Vertical Section':
             fig.add_trace(go.Scatter(x=main['VS']*M_TO_FT,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'])); fig.update_yaxes(autorange='reversed'); fig.update_layout(xaxis_title='Vertical Section (ft)',yaxis_title='TVD (ft)',height=700)
         else:
+            main_e=float(project.get('surface_easting_m',0.0) or 0.0); main_n=float(project.get('surface_northing_m',0.0) or 0.0)
             fig.add_trace(go.Scatter3d(x=main.Easting*M_TO_FT,y=main.Northing*M_TO_FT,z=-main.TVD*M_TO_FT,mode='lines+markers',name=project['well_name'],text=[f'MD {x*M_TO_FT:.0f} ft' for x in main.MD],hovertemplate='%{text}<extra></extra>'))
             fig.add_trace(go.Scatter3d(x=[main.iloc[0].Easting*M_TO_FT],y=[main.iloc[0].Northing*M_TO_FT],z=[-main.iloc[0].TVD*M_TO_FT],mode='text',text=['WH'],name='Wellhead',showlegend=False))
             fig.add_trace(go.Scatter3d(x=[main.iloc[-1].Easting*M_TO_FT],y=[main.iloc[-1].Northing*M_TO_FT],z=[-main.iloc[-1].TVD*M_TO_FT],mode='text',text=['TD'],name='TD',showlegend=False))
@@ -643,7 +690,7 @@ elif page=='Visualization':
                 for off in project.get('offsets',[]):
                     od=pd.DataFrame(off.get('surveys',[]));
                     if {'Easting','Northing','TVD'}.issubset(od.columns):
-                        oe=float(off.get('surface_easting_m',0)); on=float(off.get('surface_northing_m',0)); fig.add_trace(go.Scatter3d(x=(od.Easting+oe)*M_TO_FT,y=(od.Northing+on)*M_TO_FT,z=-od.TVD*M_TO_FT,mode='lines',name=off.get('name','Offset')))
+                        oe=float(off.get('surface_easting_m',0)); on=float(off.get('surface_northing_m',0)); fig.add_trace(go.Scatter3d(x=(od.Easting+oe-main_e)*M_TO_FT,y=(od.Northing+on-main_n)*M_TO_FT,z=-od.TVD*M_TO_FT,mode='lines',name=off.get('name','Offset')))
             if show_targets:
                 for t in project.get('targets',[]):
                     tn=float(t.get('north_m',0))-float(project.get('surface_northing_m',0)); te=float(t.get('east_m',0))-float(project.get('surface_easting_m',0)); tz=-(float(project.get('kb_m',0))-float(t.get('tvdss_m',0))); fig.add_trace(go.Scatter3d(x=[te*M_TO_FT],y=[tn*M_TO_FT],z=[tz*M_TO_FT],mode='markers+text',text=[t.get('name','Target')],textposition='top center',name=t.get('name','Target'),showlegend=False))
