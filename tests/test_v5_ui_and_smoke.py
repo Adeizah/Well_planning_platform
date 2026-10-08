@@ -80,3 +80,34 @@ def test_field_unit_conversions():
     from core.units import dls_m_to_ft, dls_ft_to_m
     assert abs(dls_m_to_ft(3.0) - 3.048) < 1e-12
     assert abs(dls_ft_to_m(3.048) - 3.0) < 1e-12
+
+
+def test_anti_collision_accepts_raw_offset_surveys_and_returns_pairwise_md():
+    import pandas as pd
+    from engineering.anti_collision import clearance_report
+    main=pd.DataFrame([{'MD':0,'Inc':0,'Azi':0},{'MD':1000,'Inc':30,'Azi':90},{'MD':2000,'Inc':45,'Azi':90}])
+    offsets=[{'name':'OW-01','surface_easting_m':100,'surface_northing_m':0,'surveys':[{'MD':0,'Inc':0,'Azi':0},{'MD':1000,'Inc':30,'Azi':90},{'MD':2000,'Inc':45,'Azi':90}]}]
+    rep=clearance_report(main,offsets,1.0,1.0)
+    assert len(rep)==1
+    assert rep.iloc[0]['offset']=='OW-01'
+    assert rep.iloc[0]['main_md_m'] >= 0
+    assert rep.iloc[0]['offset_md_m'] >= 0
+    assert rep.iloc[0]['separation_m'] > 0
+
+
+def test_target_fit_hold_solver_respects_max_inclination():
+    from core.trajectory import solve_build_hold_hold_inclination
+    out, meta = solve_build_hold_hold_inclination(
+        kop_md=1450.0,
+        build_rate_deg_30m=3.0,
+        max_hold_inc_deg=57.0,
+        hold_azi_deg=26.36,
+        target_tvd=3745.0,
+        target_north=1739.9,
+        target_east=860.0,
+        station_interval=30.0,
+    )
+    assert len(out) > 2
+    assert meta['hold_inclination_deg'] <= 57.0 + 1e-9
+    assert meta['hold_inclination_deg'] > 0
+    assert meta['final_md_m'] == out.iloc[-1]['MD']
