@@ -649,208 +649,269 @@ elif page=='BHA & Drilling':
 
 # Visualization
 elif page=='Visualization':
-    page_header('Integrated Well Visualization', 'OUTPUTS', 'Inspect the planned well, targets, offsets and covariance-based screening uncertainty. The export is a wall plot package with visualization metadata.')
+    page_header('Integrated Well Visualization', 'OUTPUTS', 'Professional plan, vertical-section, 3D and wall-plot views using a well-relative project frame. Targets, offsets and covariance uncertainty are explicitly plotted and included in the wall-plot export.')
     main=pd.DataFrame(project.get('surveys',[]))
     required_cols={'Easting','Northing','TVD','MD'}
 
+    def _surface_xy(obj=None):
+        obj=obj or project
+        return float(obj.get('surface_easting_m',0.0) or 0.0), float(obj.get('surface_northing_m',0.0) or 0.0)
+
     def _target_relative(t):
-        main_e=float(project.get('surface_easting_m',0.0) or 0.0)
-        main_n=float(project.get('surface_northing_m',0.0) or 0.0)
+        main_e,main_n=_surface_xy()
         rt=dict(t)
-        rt['north_m']=float(t.get('north_m',0.0))-main_n
-        rt['east_m']=float(t.get('east_m',0.0))-main_e
+        rt['north_m']=float(t.get('north_m',0.0) or 0.0)-main_n
+        rt['east_m']=float(t.get('east_m',0.0) or 0.0)-main_e
         return rt
 
-    def _vs_project(n_m, e_m, az_deg):
-        """Project relative North/East coordinates onto a vertical-section plane."""
-        a=math.radians(float(az_deg))
-        vs=float(n_m)*math.cos(a)+float(e_m)*math.sin(a)
-        cross=float(e_m)*math.cos(a)-float(n_m)*math.sin(a)
-        return vs, cross
-
-    def _trajectory_relative(df, surface_e=0.0, surface_n=0.0):
+    def _trajectory_relative(df, surface_e=None, surface_n=None):
         out=pd.DataFrame(df).copy()
         if out.empty or not {'Easting','Northing'}.issubset(out.columns):
             return out
-        out['E_rel_m']=out['Easting']+float(surface_e)-float(project.get('surface_easting_m',0.0) or 0.0)
-        out['N_rel_m']=out['Northing']+float(surface_n)-float(project.get('surface_northing_m',0.0) or 0.0)
+        main_e,main_n=_surface_xy()
+        se=main_e if surface_e is None else float(surface_e)
+        sn=main_n if surface_n is None else float(surface_n)
+        # Survey coordinates are well-relative. Add the well surface position for
+        # offsets, then subtract the main-well surface position to obtain a common
+        # local plotting frame with WN-01 wellhead at (0,0).
+        out['E_rel_m']=pd.to_numeric(out['Easting'],errors='coerce')+se-main_e
+        out['N_rel_m']=pd.to_numeric(out['Northing'],errors='coerce')+sn-main_n
         return out
 
-    def _add_wallplot_traces(fig, row, col, vs_az_deg, show_targets=True, show_offsets=True):
-        """Add plan + vertical-section traces to a wall-plot figure."""
-        # Main well: local/project-relative coordinates.
+    def _vs_project(n_m,e_m,az_deg):
+        a=math.radians(float(az_deg))
+        return float(n_m)*math.cos(a)+float(e_m)*math.sin(a), float(e_m)*math.cos(a)-float(n_m)*math.sin(a)
+
+    def _target_tvd(t):
+        # Stored target TVDSS is relative to MSL; KB elevation is the positive
+        # KB-to-MSL datum used by the project.
+        return float(project.get('kb_m',0.0) or 0.0)-float(t.get('tvdss_m',0.0) or 0.0)
+
+    def _uncertainty_df():
+        try:
+            params=project.get('survey_metadata',{}).get('survey_error_parameters',{})
+            cov=station_covariances(main[['MD','Inc','Azi']].copy(),**params)
+            return cov
+        except Exception as ex:
+            st.warning(f'Uncertainty ellipses could not be generated: {ex}')
+            return pd.DataFrame()
+
+    def _add_uncertainty_plan(fig, cov, row=None, col=None, showlegend=True):
+        if cov.empty: return
+        # Plot a modest number of station ellipses so the uncertainty remains
+        # readable. Coordinates are in the same local frame as the main well.
+        idxs=np.unique(np.linspace(0,len(main)-1,min(8,len(main)),dtype=int))
+        theta=np.linspace(0,2*np.pi,96)
+        for k,idx in enumerate(idxs):
+            r=cov.iloc[int(idx)]
+            maj=float(r.get('Unc_major_1sigma_m',0.0)); minor=float(r.get('Unc_minor_1sigma_m',0.0))
+            if maj<=0 or minor<=0: continue
+            alpha=math.radians(float(r.get('Unc_azimuth_deg',0.0)))
+            dn=maj*np.cos(theta)*math.cos(alpha)-minor*np.sin(theta)*math.sin(alpha)
+            de=maj*np.cos(theta)*math.sin(alpha)+minor*np.sin(theta)*math.cos(alpha)
+            x=(float(main.iloc[int(idx)]['Easting'])+de)*M_TO_FT
+            y=(float(main.iloc[int(idx)]['Northing'])+dn)*M_TO_FT
+            trace=go.Scatter(x=x,y=y,mode='lines',name='1σ positional uncertainty',legendgroup='uncertainty',showlegend=(showlegend and k==0),line=dict(dash='dot',width=1.5),hoverinfo='skip')
+            if row is None: fig.add_trace(trace)
+            else: fig.add_trace(trace,row=row,col=col)
+
+    def _add_target_plan(fig,t,row=None,col=None):
+        rt=_target_relative(t); n,e=target_boundary(rt); nm=t.get('name','Target')
+        boundary=go.Scatter(x=np.asarray(e)*M_TO_FT,y=np.asarray(n)*M_TO_FT,mode='lines',name=nm,legendgroup=f'target-{nm}',line=dict(dash='dash',width=2),hovertemplate=f'{nm}<extra></extra>')
+        center=go.Scatter(x=[float(rt.get('east_m',0))*M_TO_FT],y=[float(rt.get('north_m',0))*M_TO_FT],mode='markers+text',text=[nm],textposition='top center',name=f'{nm} center',legendgroup=f'target-{nm}',showlegend=False,marker=dict(size=10,symbol='diamond'),hovertemplate=f'{nm} center<extra></extra>')
+        if row is None:
+            fig.add_trace(boundary); fig.add_trace(center)
+        else:
+            fig.add_trace(boundary,row=row,col=col); fig.add_trace(center,row=row,col=col)
+
+    def _add_offset_plan(fig,off,row=None,col=None):
+        od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
+        if not {'E_rel_m','N_rel_m'}.issubset(od.columns): return
+        nm=off.get('name','Offset')
+        line=go.Scatter(x=od['E_rel_m']*M_TO_FT,y=od['N_rel_m']*M_TO_FT,mode='lines',name=nm,legendgroup=f'offset-{nm}',line=dict(width=1.5),hovertemplate=f'{nm}<extra></extra>')
+        surf=go.Scatter(x=[float(od.iloc[0]['E_rel_m'])*M_TO_FT],y=[float(od.iloc[0]['N_rel_m'])*M_TO_FT],mode='markers+text',text=[nm],textposition='bottom center',name=f'{nm} surface',legendgroup=f'offset-{nm}',showlegend=False,marker=dict(size=8,symbol='circle-open'),hovertemplate=f'{nm} surface<extra></extra>')
+        if row is None:
+            fig.add_trace(line); fig.add_trace(surf)
+        else:
+            fig.add_trace(line,row=row,col=col); fig.add_trace(surf,row=row,col=col)
+
+    def _plan_bounds():
+        xs=[]; ys=[]
         mr=_trajectory_relative(main)
-        fig.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],legendgroup='main',showlegend=True),row=row,col=col)
+        xs.extend((mr['E_rel_m']*M_TO_FT).tolist()); ys.extend((mr['N_rel_m']*M_TO_FT).tolist())
+        for off in project.get('offsets',[]):
+            od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
+            if {'E_rel_m','N_rel_m'}.issubset(od.columns):
+                xs.extend((od['E_rel_m']*M_TO_FT).tolist()); ys.extend((od['N_rel_m']*M_TO_FT).tolist())
+        for t in project.get('targets',[]):
+            rt=_target_relative(t); n,e=target_boundary(rt)
+            xs.extend((np.asarray(e)*M_TO_FT).tolist()); ys.extend((np.asarray(n)*M_TO_FT).tolist())
+        cov=_uncertainty_df() if len(main)>=2 else pd.DataFrame()
+        if not cov.empty:
+            for idx in np.unique(np.linspace(0,len(main)-1,min(8,len(main)),dtype=int)):
+                r=cov.iloc[int(idx)]; pad=float(r.get('Unc_major_1sigma_m',0))*M_TO_FT
+                ex=float(main.iloc[int(idx)]['Easting'])*M_TO_FT; ny=float(main.iloc[int(idx)]['Northing'])*M_TO_FT
+                xs += [ex-pad,ex+pad]; ys += [ny-pad,ny+pad]
+        if not xs: return (-100,100,-100,100)
+        xmin,xmax=min(xs),max(xs); ymin,ymax=min(ys),max(ys)
+        span=max(xmax-xmin,ymax-ymin,100.0); pad=max(50.0,span*0.08)
+        return xmin-pad,xmax+pad,ymin-pad,ymax+pad
 
     if main.empty or not required_cols.issubset(main.columns):
         st.info('No calculated trajectory is available yet. Import surveys or create and calculate a trajectory in **Survey Manager** / **Trajectory Planner**.')
     else:
-        # Determine a sensible vertical-section azimuth from the active target/planning geometry.
         targets=project.get('targets',[])
         target_options=[t for t in targets if t.get('name')]
         selected_target=None
         if target_options:
-            target_name=st.selectbox('Vertical-section target',range(len(target_options)),format_func=lambda i:target_options[i].get('name','Target'))
-            selected_target=target_options[target_name]
-        else:
-            target_name=None
+            target_idx=st.selectbox('Vertical-section target',range(len(target_options)),format_func=lambda i:target_options[i].get('name','Target'))
+            selected_target=target_options[target_idx]
 
-        main_n=float(project.get('surface_northing_m',0.0) or 0.0)
-        main_e=float(project.get('surface_easting_m',0.0) or 0.0)
         target_az=None
         if selected_target is not None:
             rt=_target_relative(selected_target)
-            target_az=(math.degrees(math.atan2(float(rt['east_m']),float(rt['north_m'])))%360.0) if abs(float(rt['north_m']))+abs(float(rt['east_m']))>1e-9 else 0.0
+            if abs(float(rt.get('north_m',0)))+abs(float(rt.get('east_m',0)))>1e-9:
+                target_az=math.degrees(math.atan2(float(rt['east_m']),float(rt['north_m'])))%360.0
+            else: target_az=0.0
         planner_az=None
-        try:
-            planner_az=float(project.get('trajectory_metadata',{}).get('planner_result',{}).get('planning_azimuth_deg'))
-        except Exception:
-            planner_az=None
-        if planner_az is None:
-            try:
-                planner_az=float(project.get('trajectory_metadata',{}).get('planner_result',{}).get('planning_azimuth'))
-            except Exception:
-                planner_az=None
-        if planner_az is None and not main.empty and 'Azi' in main.columns:
-            planner_az=float(main.iloc[-1]['Azi'])
-
+        try: planner_az=float(project.get('trajectory_metadata',{}).get('planner_result',{}).get('planning_azimuth_deg'))
+        except Exception: planner_az=None
+        if planner_az is None and 'Azi' in main.columns: planner_az=float(main.iloc[-1]['Azi'])
         source_options=[]
         if target_az is not None: source_options.append('Target azimuth')
         if planner_az is not None: source_options.append('Planning/final well azimuth')
         source_options.append('Custom')
         source=st.selectbox('Vertical-section azimuth source',source_options)
-        if source=='Target azimuth':
-            vs_az=float(target_az)
-        elif source=='Planning/final well azimuth':
-            vs_az=float(planner_az)
-        else:
-            vs_az=st.number_input('Vertical-section azimuth (° Grid)',0.0,360.0,float(target_az if target_az is not None else (planner_az or 0.0)),step=0.1)
-        st.caption(f'Vertical-section azimuth: **{vs_az:.2f}° Grid**. VS is the projection along this azimuth; perpendicular offset is the cross-section distance from the VS plane.')
+        if source=='Target azimuth': vs_az=float(target_az)
+        elif source=='Planning/final well azimuth': vs_az=float(planner_az)
+        else: vs_az=st.number_input('Vertical-section azimuth (° Grid)',0.0,360.0,float(target_az if target_az is not None else (planner_az or 0.0)),step=0.1)
+        st.caption(f'Vertical-section azimuth: **{vs_az:.2f}° Grid** • All horizontal plots use WN-01 wellhead = (0, 0) ft.')
 
         view=st.selectbox('View',['Plan','Vertical Section','3D','Wall Plot'])
         show_unc=st.checkbox('Show covariance uncertainty',True)
         show_targets=st.checkbox('Show targets',True)
         show_offsets=st.checkbox('Show offsets',True)
+        cov=_uncertainty_df() if show_unc else pd.DataFrame()
+        mr=_trajectory_relative(main)
         fig=go.Figure()
 
         if view=='Plan':
-            mr=_trajectory_relative(main)
-            fig.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],text=[f"MD {x*M_TO_FT:.0f} ft" for x in main['MD']],hovertemplate='%{text}<extra></extra>'))
+            fig.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],line=dict(width=3),marker=dict(size=4)))
             if show_offsets:
-                for off in project.get('offsets',[]):
-                    od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),float(off.get('surface_easting_m',0)),float(off.get('surface_northing_m',0)))
-                    if {'E_rel_m','N_rel_m'}.issubset(od.columns):
-                        fig.add_trace(go.Scatter(x=od['E_rel_m']*M_TO_FT,y=od['N_rel_m']*M_TO_FT,mode='lines',name=off.get('name','Offset')))
+                for off in project.get('offsets',[]): _add_offset_plan(fig,off)
             if show_targets:
-                for t in targets:
-                    rt=_target_relative(t); n,e=target_boundary(rt); fig.add_trace(go.Scatter(x=np.asarray(e)*M_TO_FT,y=np.asarray(n)*M_TO_FT,mode='lines+markers',name=t.get('name','Target'),line=dict(dash='dash')))
-            if show_unc:
-                try:
-                    cov=station_covariances(main[['MD','Inc','Azi']].copy(), **project.get('survey_metadata',{}).get('survey_error_parameters',{}))
-                    idxs=np.linspace(0,len(main)-1,min(8,len(main)),dtype=int); theta=np.linspace(0,2*np.pi,72)
-                    for k,idx in enumerate(idxs):
-                        r=cov.iloc[idx]; maj=float(r['Unc_major_1sigma_m']); minr=float(r['Unc_minor_1sigma_m']); alpha=np.radians(float(r['Unc_azimuth_deg']))
-                        dn=maj*np.cos(theta)*np.cos(alpha)-minr*np.sin(theta)*np.sin(alpha); de=maj*np.cos(theta)*np.sin(alpha)+minr*np.sin(theta)*np.cos(alpha)
-                        fig.add_trace(go.Scatter(x=(float(main.iloc[idx].Northing)*0+float(main.iloc[idx].Easting)+de)*M_TO_FT,y=(float(main.iloc[idx].Northing)+dn)*M_TO_FT,mode='lines',name='1σ uncertainty' if k==0 else None,showlegend=(k==0),hoverinfo='skip'))
-                except Exception as ex:
-                    st.warning(f'Uncertainty ellipses could not be generated: {ex}')
-            fig.update_layout(xaxis_title='Relative Easting (ft)',yaxis_title='Relative Northing (ft)',height=700)
+                for t in targets: _add_target_plan(fig,t)
+            if show_unc: _add_uncertainty_plan(fig,cov)
+            xmin,xmax,ymin,ymax=_plan_bounds()
+            fig.update_xaxes(title_text='Relative Easting (ft)',range=[xmin,xmax],zeroline=True,showgrid=True)
+            fig.update_yaxes(title_text='Relative Northing (ft)',range=[ymin,ymax],zeroline=True,showgrid=True,scaleanchor='x',scaleratio=1)
+            fig.update_layout(height=700,title=f"{project['well_name']} — Plan View",margin=dict(l=60,r=30,t=70,b=60),legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0))
 
         elif view=='Vertical Section':
-            mr=_trajectory_relative(main)
-            main_vs=[_vs_project(n,e,vs_az)[0] for n,e in zip(mr['N_rel_m'],mr['E_rel_m'])]
-            fig.add_trace(go.Scatter(x=np.asarray(main_vs)*M_TO_FT,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name']))
+            main_vs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(mr['N_rel_m'],mr['E_rel_m'])])*M_TO_FT
+            fig.add_trace(go.Scatter(x=main_vs,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],line=dict(width=3),marker=dict(size=4)))
+            vs_x=[]; vs_y=[]
+            vs_x.extend(main_vs.tolist()); vs_y.extend((main['TVD']*M_TO_FT).tolist())
             if show_offsets:
                 for off in project.get('offsets',[]):
-                    od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),float(off.get('surface_easting_m',0)),float(off.get('surface_northing_m',0)))
+                    od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
                     if {'N_rel_m','E_rel_m','TVD'}.issubset(od.columns):
-                        ovs=[_vs_project(n,e,vs_az)[0] for n,e in zip(od['N_rel_m'],od['E_rel_m'])]
-                        fig.add_trace(go.Scatter(x=np.asarray(ovs)*M_TO_FT,y=od['TVD']*M_TO_FT,mode='lines',name=off.get('name','Offset')))
+                        ovs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(od['N_rel_m'],od['E_rel_m'])])*M_TO_FT
+                        fig.add_trace(go.Scatter(x=ovs,y=od['TVD']*M_TO_FT,mode='lines',name=off.get('name','Offset'),line=dict(width=1.5)))
+                        vs_x.extend(ovs.tolist()); vs_y.extend((od['TVD']*M_TO_FT).tolist())
             if show_targets:
                 for t in targets:
-                    rt=_target_relative(t); n,e=target_boundary(rt); vs=[_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)]; tvd=float(project.get('kb_m',0))-float(t.get('tvdss_m',0));
-                    fig.add_trace(go.Scatter(x=np.asarray(vs)*M_TO_FT,y=np.full(len(vs),tvd*M_TO_FT),mode='lines+markers',name=t.get('name','Target'),line=dict(dash='dash')))
-            fig.update_yaxes(autorange='reversed'); fig.update_layout(xaxis_title='Vertical Section (ft)',yaxis_title='TVD (ft)',height=700)
+                    rt=_target_relative(t); n,e=target_boundary(rt); tx=np.array([_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)])*M_TO_FT; ty=np.full(len(tx),_target_tvd(t)*M_TO_FT)
+                    nm=t.get('name','Target'); fig.add_trace(go.Scatter(x=tx,y=ty,mode='lines+markers',name=nm,line=dict(dash='dash',width=2))); fig.add_trace(go.Scatter(x=[float(np.mean(tx))],y=[float(ty[0])],mode='markers+text',text=[nm],textposition='top center',name=f'{nm} center',showlegend=False,marker=dict(size=9,symbol='diamond')))
+                    vs_x.extend(tx.tolist()); vs_y.extend(ty.tolist())
+            xmin,xmax=(min(vs_x),max(vs_x)) if vs_x else (-100,100); ymin,ymax=(min(vs_y),max(vs_y)) if vs_y else (0,100)
+            spanx=max(xmax-xmin,100.0); spany=max(ymax-ymin,100.0); px=max(50,0.08*spanx); py=max(50,0.05*spany)
+            fig.update_xaxes(title_text=f'Vertical Section @ {vs_az:.2f}° Grid (ft)',range=[xmin-px,xmax+px])
+            fig.update_yaxes(title_text='TVD (ft)',range=[ymax+py,ymin-py])
+            fig.update_layout(height=700,title=f"{project['well_name']} — Vertical Section",margin=dict(l=60,r=30,t=70,b=60),legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0))
 
         elif view=='3D':
-            mr=_trajectory_relative(main)
             fig=go.Figure()
-            fig.add_trace(go.Scatter3d(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,z=-main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],text=[f'MD {x*M_TO_FT:.0f} ft' for x in main.MD],hovertemplate='%{text}<extra></extra>'))
+            fig.add_trace(go.Scatter3d(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,z=-main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],line=dict(width=6),marker=dict(size=2)))
             if show_offsets:
                 for off in project.get('offsets',[]):
-                    od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),float(off.get('surface_easting_m',0)),float(off.get('surface_northing_m',0)))
-                    if {'E_rel_m','N_rel_m','TVD'}.issubset(od.columns):
-                        fig.add_trace(go.Scatter3d(x=od['E_rel_m']*M_TO_FT,y=od['N_rel_m']*M_TO_FT,z=-od['TVD']*M_TO_FT,mode='lines',name=off.get('name','Offset')))
+                    od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
+                    if {'E_rel_m','N_rel_m','TVD'}.issubset(od.columns): fig.add_trace(go.Scatter3d(x=od['E_rel_m']*M_TO_FT,y=od['N_rel_m']*M_TO_FT,z=-od['TVD']*M_TO_FT,mode='lines',name=off.get('name','Offset'),line=dict(width=3)))
             if show_targets:
                 for t in targets:
-                    rt=_target_relative(t); n,e=target_boundary(rt); tvd=float(project.get('kb_m',0))-float(t.get('tvdss_m',0)); fig.add_trace(go.Scatter3d(x=np.asarray(e)*M_TO_FT,y=np.asarray(n)*M_TO_FT,z=np.full(len(e),-tvd*M_TO_FT),mode='lines+markers',name=t.get('name','Target'),line=dict(dash='dash')))
-            fig.update_layout(scene=dict(xaxis_title='Easting (ft)',yaxis_title='Northing (ft)',zaxis_title='-TVD (ft)'),height=750)
+                    rt=_target_relative(t); n,e=target_boundary(rt); tvd=_target_tvd(t); nm=t.get('name','Target')
+                    fig.add_trace(go.Scatter3d(x=np.asarray(e)*M_TO_FT,y=np.asarray(n)*M_TO_FT,z=np.full(len(e),-tvd*M_TO_FT),mode='lines+markers',name=nm,line=dict(dash='dash',width=4),marker=dict(size=3)))
+            xmin,xmax,ymin,ymax=_plan_bounds(); fig.update_layout(height=750,title=f"{project['well_name']} — 3D",scene=dict(xaxis=dict(title='Relative Easting (ft)',range=[xmin,xmax]),yaxis=dict(title='Relative Northing (ft)',range=[ymin,ymax]),zaxis=dict(title='TVD (ft)')),margin=dict(l=10,r=10,t=60,b=10))
 
         else:  # Wall Plot
-            # Wall plot is a composite planning deliverable: plan + section + compact reference block.
             wall=make_subplots(rows=1,cols=2,subplot_titles=('Plan View','Vertical Section'),horizontal_spacing=0.10)
-            mr=_trajectory_relative(main)
-            wall.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],legendgroup='main'),row=1,col=1)
-            main_vs=[_vs_project(n,e,vs_az)[0] for n,e in zip(mr['N_rel_m'],mr['E_rel_m'])]
-            wall.add_trace(go.Scatter(x=np.asarray(main_vs)*M_TO_FT,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],legendgroup='main',showlegend=False),row=1,col=2)
+            wall.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],legendgroup='main',line=dict(width=3),marker=dict(size=3)),row=1,col=1)
+            main_vs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(mr['N_rel_m'],mr['E_rel_m'])])*M_TO_FT
+            wall.add_trace(go.Scatter(x=main_vs,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],legendgroup='main',showlegend=False,line=dict(width=3),marker=dict(size=3)),row=1,col=2)
             if show_offsets:
                 for off in project.get('offsets',[]):
-                    od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),float(off.get('surface_easting_m',0)),float(off.get('surface_northing_m',0)))
-                    if {'E_rel_m','N_rel_m','TVD'}.issubset(od.columns):
-                        nm=off.get('name','Offset'); wall.add_trace(go.Scatter(x=od['E_rel_m']*M_TO_FT,y=od['N_rel_m']*M_TO_FT,mode='lines',name=nm,legendgroup=nm),row=1,col=1)
-                        ovs=[_vs_project(n,e,vs_az)[0] for n,e in zip(od['N_rel_m'],od['E_rel_m'])]; wall.add_trace(go.Scatter(x=np.asarray(ovs)*M_TO_FT,y=od['TVD']*M_TO_FT,mode='lines',name=nm,legendgroup=nm,showlegend=False),row=1,col=2)
+                    _add_offset_plan(wall,off,row=1,col=1)
+                    od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
+                    if {'N_rel_m','E_rel_m','TVD'}.issubset(od.columns):
+                        ovs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(od['N_rel_m'],od['E_rel_m'])])*M_TO_FT
+                        wall.add_trace(go.Scatter(x=ovs,y=od['TVD']*M_TO_FT,mode='lines',name=off.get('name','Offset'),legendgroup=f"offset-{off.get('name','Offset')}",showlegend=False,line=dict(width=1.5)),row=1,col=2)
             if show_targets:
                 for t in targets:
-                    rt=_target_relative(t); n,e=target_boundary(rt); nm=t.get('name','Target'); wall.add_trace(go.Scatter(x=np.asarray(e)*M_TO_FT,y=np.asarray(n)*M_TO_FT,mode='lines+markers',name=nm,legendgroup=nm,line=dict(dash='dash')),row=1,col=1)
-                    tvd=float(project.get('kb_m',0))-float(t.get('tvdss_m',0)); vs=[_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)]; wall.add_trace(go.Scatter(x=np.asarray(vs)*M_TO_FT,y=np.full(len(vs),tvd*M_TO_FT),mode='lines+markers',name=nm,legendgroup=nm,showlegend=False,line=dict(dash='dash')),row=1,col=2)
-            wall.update_yaxes(autorange='reversed',row=1,col=2)
-            wall.update_xaxes(title_text='Relative Easting (ft)',row=1,col=1); wall.update_yaxes(title_text='Relative Northing (ft)',row=1,col=1)
-            wall.update_xaxes(title_text=f'Vertical Section @ {vs_az:.2f}° Grid (ft)',row=1,col=2); wall.update_yaxes(title_text='TVD (ft)',row=1,col=2)
-            wall.update_layout(height=720,title=f"{project['well_name']} — Wall Plot",margin=dict(l=50,r=30,t=80,b=50),legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0))
-            wall.add_annotation(text=f"CRS: {project.get('crs')}  |  North ref: {project.get('north_reference','Grid North')}  |  VS azimuth: {vs_az:.2f}° Grid  |  Declination: {project.get('reference_data',{}).get('magnetic_declination_deg','—')}°  |  Convergence: {project.get('reference_data',{}).get('grid_convergence_deg','—')}°",xref='paper',yref='paper',x=0,y=-0.12,showarrow=False,align='left')
+                    _add_target_plan(wall,t,row=1,col=1)
+                    rt=_target_relative(t); n,e=target_boundary(rt); tx=np.array([_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)])*M_TO_FT; ty=np.full(len(tx),_target_tvd(t)*M_TO_FT); nm=t.get('name','Target')
+                    wall.add_trace(go.Scatter(x=tx,y=ty,mode='lines+markers',name=nm,legendgroup=f'target-{nm}',showlegend=False,line=dict(dash='dash',width=2)),row=1,col=2)
+            if show_unc: _add_uncertainty_plan(wall,cov,row=1,col=1,showlegend=True)
+            xmin,xmax,ymin,ymax=_plan_bounds()
+            wall.update_xaxes(title_text='Relative Easting (ft)',range=[xmin,xmax],row=1,col=1)
+            wall.update_yaxes(title_text='Relative Northing (ft)',range=[ymin,ymax],scaleanchor='x',scaleratio=1,row=1,col=1)
+            allvs=main_vs.tolist(); alltvd=(main['TVD']*M_TO_FT).tolist()
+            for off in project.get('offsets',[]):
+                od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
+                if {'N_rel_m','E_rel_m','TVD'}.issubset(od.columns):
+                    allvs.extend((np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(od['N_rel_m'],od['E_rel_m'])])*M_TO_FT).tolist()); alltvd.extend((od['TVD']*M_TO_FT).tolist())
+            for t in targets:
+                rt=_target_relative(t); n,e=target_boundary(rt); allvs.extend((np.array([_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)])*M_TO_FT).tolist()); alltvd.append(_target_tvd(t)*M_TO_FT)
+            vxmin,vxmax=min(allvs),max(allvs); vymin,vymax=min(alltvd),max(alltvd); vpx=max(50,0.08*(vxmax-vxmin)); vpy=max(50,0.05*(vymax-vymin))
+            wall.update_xaxes(title_text=f'Vertical Section @ {vs_az:.2f}° Grid (ft)',range=[vxmin-vpx,vxmax+vpx],row=1,col=2)
+            wall.update_yaxes(title_text='TVD (ft)',range=[vymax+vpy,vymin-vpy],row=1,col=2)
+            wall.update_layout(height=760,title=f"{project['well_name']} — Wall Plot",margin=dict(l=50,r=30,t=90,b=85),legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0))
+            wall.add_annotation(text=f"CRS: {project.get('crs','—')} | North reference: {project.get('north_reference','Grid North')} | VS azimuth: {vs_az:.2f}° Grid | Declination: {project.get('reference_data',{}).get('magnetic_declination_deg','—')}° | Convergence: {project.get('reference_data',{}).get('grid_convergence_deg','—')}° | 1σ uncertainty: {'shown' if show_unc else 'hidden'}",xref='paper',yref='paper',x=0,y=-0.13,showarrow=False,align='left')
             fig=wall
 
         st.plotly_chart(fig,use_container_width=True)
 
-        # Single export: wall plot + metadata only. Individual Plan/VS/3D exports are intentionally omitted.
         st.markdown('### Export')
         metadata={
-            'well':project.get('well_name'), 'project':project.get('project_name'), 'crs':project.get('crs'),
-            'north_reference':project.get('north_reference','Grid North'),
-            'vertical_section_azimuth_deg_grid':round(float(vs_az),6),
+            'well':project.get('well_name'),'project':project.get('project_name'),'crs':project.get('crs'),
+            'north_reference':project.get('north_reference','Grid North'),'vertical_section_azimuth_deg_grid':round(float(vs_az),6),
             'target':selected_target.get('name') if selected_target else None,
-            'declination_deg':project.get('reference_data',{}).get('magnetic_declination_deg'),
-            'grid_convergence_deg':project.get('reference_data',{}).get('grid_convergence_deg'),
-            'geomagnetic_model':project.get('reference_data',{}).get('geomagnetic_model'),
-            'trajectory_stations':int(len(main)),
-            'offset_wells':int(len(project.get('offsets',[]))),
-            'targets':int(len(targets)),
-            'uncertainty_model':project.get('survey_metadata',{}).get('uncertainty_model',''),
-            'export_generated_utc':datetime.utcnow().isoformat()+'Z',
+            'declination_deg':project.get('reference_data',{}).get('magnetic_declination_deg'),'grid_convergence_deg':project.get('reference_data',{}).get('grid_convergence_deg'),
+            'geomagnetic_model':project.get('reference_data',{}).get('geomagnetic_model'),'trajectory_stations':int(len(main)),
+            'offset_wells':int(len(project.get('offsets',[]))),'targets':int(len(targets)),'uncertainty_model':project.get('survey_metadata',{}).get('uncertainty_model',''),
+            'uncertainty_plotted':bool(show_unc),'wall_plot_coordinate_frame':'Well-relative local grid; WN-01 wellhead = (0,0) ft','export_generated_utc':datetime.utcnow().isoformat()+'Z'
         }
-        wall_fig=fig if view=='Wall Plot' else make_subplots(rows=1,cols=2,subplot_titles=('Plan View','Vertical Section'),horizontal_spacing=0.10)
-        if view!='Wall Plot':
-            # Rebuild the export wall plot independently so export does not depend on the selected UI view.
-            wall_fig=make_subplots(rows=1,cols=2,subplot_titles=('Plan View','Vertical Section'),horizontal_spacing=0.10)
-            mr=_trajectory_relative(main)
-            wall_fig.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines',name=project['well_name']),row=1,col=1)
-            main_vs=[_vs_project(n,e,vs_az)[0] for n,e in zip(mr['N_rel_m'],mr['E_rel_m'])]
-            wall_fig.add_trace(go.Scatter(x=np.asarray(main_vs)*M_TO_FT,y=main['TVD']*M_TO_FT,mode='lines',name=project['well_name'],showlegend=False),row=1,col=2)
-            if show_offsets:
-                for off in project.get('offsets',[]):
-                    od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),float(off.get('surface_easting_m',0)),float(off.get('surface_northing_m',0)))
-                    if {'E_rel_m','N_rel_m','TVD'}.issubset(od.columns):
-                        nm=off.get('name','Offset'); wall_fig.add_trace(go.Scatter(x=od['E_rel_m']*M_TO_FT,y=od['N_rel_m']*M_TO_FT,mode='lines',name=nm),row=1,col=1)
-                        ovs=[_vs_project(n,e,vs_az)[0] for n,e in zip(od['N_rel_m'],od['E_rel_m'])]; wall_fig.add_trace(go.Scatter(x=np.asarray(ovs)*M_TO_FT,y=od['TVD']*M_TO_FT,mode='lines',name=nm,showlegend=False),row=1,col=2)
-            if show_targets:
-                for t in targets:
-                    rt=_target_relative(t); n,e=target_boundary(rt); nm=t.get('name','Target'); wall_fig.add_trace(go.Scatter(x=np.asarray(e)*M_TO_FT,y=np.asarray(n)*M_TO_FT,mode='lines',name=nm,line=dict(dash='dash')),row=1,col=1)
-                    tvd=float(project.get('kb_m',0))-float(t.get('tvdss_m',0)); vs=[_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)]; wall_fig.add_trace(go.Scatter(x=np.asarray(vs)*M_TO_FT,y=np.full(len(vs),tvd*M_TO_FT),mode='lines',name=nm,showlegend=False,line=dict(dash='dash')),row=1,col=2)
-            wall_fig.update_yaxes(autorange='reversed',row=1,col=2)
-            wall_fig.update_xaxes(title_text='Relative Easting (ft)',row=1,col=1); wall_fig.update_yaxes(title_text='Relative Northing (ft)',row=1,col=1)
-            wall_fig.update_xaxes(title_text=f'Vertical Section @ {vs_az:.2f}° Grid (ft)',row=1,col=2); wall_fig.update_yaxes(title_text='TVD (ft)',row=1,col=2)
-            wall_fig.update_layout(height=720,title=f"{project['well_name']} — Wall Plot")
-        html=wall_fig.to_html(full_html=True,include_plotlyjs='cdn')
+        # Always export the full wall plot with all three optional engineering layers,
+        # independent of the current interactive checkbox state, so the package is a
+        # reproducible deliverable rather than a screenshot of the current UI state.
+        export_wall=make_subplots(rows=1,cols=2,subplot_titles=('Plan View','Vertical Section'),horizontal_spacing=0.10)
+        export_wall.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],line=dict(width=3)),row=1,col=1)
+        export_wall.add_trace(go.Scatter(x=main_vs,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],showlegend=False,line=dict(width=3)),row=1,col=2)
+        for off in project.get('offsets',[]):
+            _add_offset_plan(export_wall,off,row=1,col=1)
+            od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
+            if {'N_rel_m','E_rel_m','TVD'}.issubset(od.columns):
+                ovs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(od['N_rel_m'],od['E_rel_m'])])*M_TO_FT
+                export_wall.add_trace(go.Scatter(x=ovs,y=od['TVD']*M_TO_FT,mode='lines',name=off.get('name','Offset'),showlegend=False,line=dict(width=1.5)),row=1,col=2)
+        for t in targets:
+            _add_target_plan(export_wall,t,row=1,col=1)
+            rt=_target_relative(t); n,e=target_boundary(rt); tx=np.array([_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)])*M_TO_FT; ty=np.full(len(tx),_target_tvd(t)*M_TO_FT); nm=t.get('name','Target')
+            export_wall.add_trace(go.Scatter(x=tx,y=ty,mode='lines+markers',name=nm,showlegend=False,line=dict(dash='dash',width=2)),row=1,col=2)
+        _add_uncertainty_plan(export_wall,cov,row=1,col=1,showlegend=True)
+        export_wall.update_xaxes(title_text='Relative Easting (ft)',range=[xmin,xmax],row=1,col=1); export_wall.update_yaxes(title_text='Relative Northing (ft)',range=[ymin,ymax],scaleanchor='x',scaleratio=1,row=1,col=1)
+        export_wall.update_xaxes(title_text=f'Vertical Section @ {vs_az:.2f}° Grid (ft)',range=[vxmin-vpx,vxmax+vpx],row=1,col=2); export_wall.update_yaxes(title_text='TVD (ft)',range=[vymax+vpy,vymin-vpy],row=1,col=2)
+        export_wall.update_layout(height=760,title=f"{project['well_name']} — Wall Plot",margin=dict(l=50,r=30,t=90,b=85),legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0))
+        export_wall.add_annotation(text=f"CRS: {project.get('crs','—')} | North reference: {project.get('north_reference','Grid North')} | VS azimuth: {vs_az:.2f}° Grid | Declination: {project.get('reference_data',{}).get('magnetic_declination_deg','—')}° | Convergence: {project.get('reference_data',{}).get('grid_convergence_deg','—')}°",xref='paper',yref='paper',x=0,y=-0.13,showarrow=False,align='left')
+        html=export_wall.to_html(full_html=True,include_plotlyjs=True)
         buf=BytesIO()
         with zipfile.ZipFile(buf,'w',compression=zipfile.ZIP_DEFLATED) as z:
             z.writestr(f"{project['well_name']}_wall_plot.html",html)
