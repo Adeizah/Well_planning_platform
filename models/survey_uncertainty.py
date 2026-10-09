@@ -82,15 +82,21 @@ def station_covariances(df, sigma_md_ft=0.5, sigma_inc_deg=0.10, sigma_azi_deg=0
     for j in range(1, len(w)):
         row0, row1 = w.iloc[j - 1], w.iloc[j]
         x = np.array([row0.MD, row0.Inc, row0.Azi, row1.Inc, row1.Azi], dtype=float)
-        steps = np.array([max(1e-4, s_md / 10.0), max(1e-6, s_i / 10.0),
-                          max(1e-6, s_a / 10.0), max(1e-6, s_i / 10.0),
-                          max(1e-6, s_a / 10.0)])
+        # _segment_position accepts inclination/azimuth in DEGREES. Keep the
+        # finite-difference perturbations and covariance variances in degrees
+        # too; mixing radian-sized perturbations with degree-valued inputs
+        # suppressed random angular uncertainty by roughly 57.3^2.
+        s_i_deg = float(sigma_inc_deg)
+        s_a_deg = float(sigma_azi_deg)
+        steps = np.array([max(1e-4, s_md / 10.0), max(1e-4, s_i_deg / 10.0),
+                          max(1e-4, s_a_deg / 10.0), max(1e-4, s_i_deg / 10.0),
+                          max(1e-4, s_a_deg / 10.0)])
 
         def f(z):
             return _segment_position(z[0], z[1], z[2], row1.MD, z[3], z[4])
 
         J = _numeric_jacobian(f, x, steps)
-        q = np.diag([s_md**2, s_i**2, s_a**2, s_i**2, s_a**2])
+        q = np.diag([s_md**2, s_i_deg**2, s_a_deg**2, s_i_deg**2, s_a_deg**2])
         random_cov = random_cov + J @ q @ J.T
         random_cov = 0.5 * (random_cov + random_cov.T)
 
