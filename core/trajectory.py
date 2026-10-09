@@ -158,3 +158,101 @@ def solve_build_hold_hold_inclination(kop_md, build_rate_deg_30m, max_hold_inc_d
 
 def trajectory_3d(df):
     return df[["Easting", "Northing", "TVD"]].copy()
+
+
+def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg,
+                               hold_azi_deg, target_tvd, target_north, target_east,
+                               drop_rate_deg_30m=None, final_inc_deg=0.0,
+                               station_interval=30.0, max_md=15000.0):
+    """Generate a transparent piecewise-constant-rate trajectory profile.
+
+    This is a planning candidate generator, not a full target-constrained
+    directional optimizer. MD and coordinates are metres; DLS is per 30 m.
+    Every profile selection changes the generated inclination-versus-MD path.
+    """
+    profile = str(profile or "Build & Hold")
+    br = float(build_rate_deg_30m)
+    dr = float(drop_rate_deg_30m if drop_rate_deg_30m is not None else br)
+    kop = float(kop_md)
+    hold = float(hold_inc_deg)
+    azi = float(hold_azi_deg) % 360.0
+    target_tvd = float(target_tvd)
+    final_inc = float(final_inc_deg)
+    if station_interval <= 0 or max_md <= 0:
+        raise ValueError("Station interval and maximum MD must be positive.")
+    if target_tvd <= 0:
+        raise ValueError("Target TVD must be positive.")
+    if profile != "Vertical" and (br <= 0 or hold <= 0):
+        raise ValueError("Build rate and hold inclination must be positive for this profile.")
+    if not 0 <= hold <= 180 or not 0 <= final_inc <= 180:
+        raise ValueError("Inclinations must be between 0 and 180 degrees.")
+    if kop < 0 or kop >= max_md:
+        raise ValueError("KOP must be non-negative and below maximum MD.")
+
+    if profile == "Vertical":
+        end_md = min(max_md, max(target_tvd, station_interval))
+        mds = np.arange(0.0, end_md, station_interval).tolist() + [end_md]
+        incs = [0.0] * len(mds)
+    else:
+        if profile == "Horizontal":
+            peak_inc = 90.0
+            post_profile = "hold"
+        elif profile == "ERD":
+            peak_inc = min(max(hold, 75.0), 88.0)
+            post_profile = "hold"
+        else:
+            peak_inc = hold
+            post_profile = "drop" if profile in ("S-Profile", "Build-Hold-Drop") else "hold"
+        build_len = abs(peak_inc) / br * 30.0
+        build_end = kop + build_len
+        if build_end > max_md:
+            raise ValueError("Build section exceeds maximum MD; reduce KOP/build angle or increase the planning MD limit.")
+        drop_len = abs(peak_inc-final_inc) / dr * 30.0 if post_profile == "drop" else 0.0
+        # For S and build-hold-drop, begin the drop after an initial hold period
+        # that consumes about 70% of the remaining target TVD at peak inclination.
+        drop_start = None
+        if post_profile == "drop":
+            cos_peak = max(abs(np.cos(np.radians(peak_inc))), 0.05)
+            estimated_hold = max(0.0, (target_tvd - build_end * 0.8) / cos_peak)
+            hold_len = max(0.0, 0.70 * estimated_hold)
+            drop_start = min(max_md-drop_len, build_end + hold_len)
+        mds = np.arange(0.0, max_md, station_interval).tolist()
+        if not mds or mds[0] != 0.0: mds.insert(0, 0.0)
+        mds = sorted(set([float(x) for x in mds] + [float(kop), float(build_end)] + ([float(drop_start), float(drop_start+drop_len)] if drop_start is not None else [])))
+        mds = [x for x in mds if 0 <= x <= max_md]
+        incs=[]
+        build_rate_m = br/30.0
+        drop_rate_m = dr/30.0
+        for md in mds:
+            if md < kop:
+                inc=0.0
+            elif md <= build_end:
+                inc=min(peak_inc, max(0.0,(md-kop)*build_rate_m))
+            elif drop_start is not None and md >= drop_start:
+                inc=max(final_inc, peak_inc - (md-drop_start)*drop_rate_m)
+            else:
+                inc=peak_inc
+            incs.append(float(inc))
+        # Trim at first station reaching target TVD, retaining the crossing point.
+    azis = [azi] * len(mds)
+    rows = pd.DataFrame({"MD": mds, "Inc": incs, "Azi": azis})
+    out = minimum_curvature(rows, dls_interval=30.0)
+    crossed = np.flatnonzero(out["TVD"].to_numpy() >= target_tvd)
+    if len(crossed):
+        out = out.iloc[:int(crossed[0])+1].copy().reset_index(drop=True)
+    end = out.iloc[-1]
+    lateral_error = float(np.hypot(float(end["Northing"])-target_north, float(end["Easting"])-target_east))
+    tvd_error = float(end["TVD"]-target_tvd)
+    result = {
+        "status": "PASS" if lateral_error < 30.48 and abs(tvd_error) < 30.48 else "REVIEW",
+        "profile": profile, "lateral_error_m": lateral_error, "tvd_error_m": tvd_error,
+        "build_end_md_m": float(kop + abs(peak_inc)/br*30.0) if profile != "Vertical" else 0.0,
+        "build_length_m": float(abs(peak_inc)/br*30.0) if profile != "Vertical" else 0.0,
+        "hold_inclination_deg": float(peak_inc), "planning_azimuth_deg": float(azi),
+        "endpoint_north_m": float(end["Northing"]), "endpoint_east_m": float(end["Easting"]),
+        "endpoint_tvd_m": float(end["TVD"]), "final_md_m": float(end["MD"]),
+        "drop_rate_deg_30m": float(dr) if post_profile == "drop" else None,
+        "final_inclination_deg": float(end["Inc"]),
+        "note": "Practice-grade profile generation; verify target fit, DLS, constraints and survey conventions before engineering use."
+    }
+    return out, result
