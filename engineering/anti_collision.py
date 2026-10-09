@@ -121,8 +121,12 @@ def clearance_report(main_df, offsets, survey_error_model=None, samples_per_well
         else:
             directional_sigma=float(np.sqrt(max(0.0, np.trace(rel_cov)/3.0)))
         sf=float(sep/directional_sigma) if directional_sigma>0 else np.inf
-        if directional_sigma<=0:
-            status="REVIEW"; note="Zero propagated uncertainty; configure non-zero survey error parameters."
+        if not np.isfinite(directional_sigma) or directional_sigma<=1e-12:
+            status="REVIEW"
+            if main_md[i] <= 1e-6 and off_md[j] <= 1e-6 and float(model.get("sigma_surface_ft", 5.0) or 0.0) <= 0.0:
+                note="Closest approach is at the wellhead (MD≈0) and surface-position σ is set to 0 ft, so relative uncertainty evaluates to zero. Enter a justified non-zero surface-position uncertainty or verify the wellhead-positioning uncertainty; do not interpret this as clearance."
+            else:
+                note="Propagated uncertainty is zero or invalid. Check survey stations, angular-error propagation, and surface-position assumptions; do not interpret as clearance."
         else:
             status="PASS" if sf>=2.0 else ("WARNING" if sf>=1.0 else "ALERT")
             note="Covariance-based screening; threshold 2.0 is illustrative. Production work requires a validated ISCWSA error model and company-approved separation rules."
