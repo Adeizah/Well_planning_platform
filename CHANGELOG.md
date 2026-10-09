@@ -70,3 +70,12 @@
 - Added trajectory profile generation for Vertical, J-Profile, S-Profile, Build & Hold, Build-Hold-Drop, Horizontal, ERD and Custom. The selected profile now generates a different inclination-versus-MD trajectory when Generate is pressed.
 - Added a project maximum-inclination check for generated profiles.
 - These remain engineering-development calculations, not ISCWSA-certified anti-collision or a full target-constrained trajectory optimizer.
+
+## Audit follow-up — visualization and reference-state fixes
+
+- Made wall-plot export geometry and axis bounds independent of the selected interactive view; export no longer relies on variables initialized only by the Wall Plot branch.
+- Corrected survey azimuth reference validation to require declination and/or grid convergence according to the actual input-reference to project-reference conversion.
+- Preserved selected depth reference, survey tool, and survey calculation method across Streamlit reruns.
+- Stored the active geomagnetic model and its metadata in `reference_data` for consistent visualization export metadata.
+- Distinguished uncertainty availability from whether uncertainty is shown in the export, and added a visible warning when requested uncertainty ellipses cannot be generated.
+- Added regression tests for these behaviours.

@@ -267,7 +267,7 @@ elif page=='Project & Reference':
         if ci.get('type') == 'Projected':
             st.info(f"Wellhead projected position: Easting {project.get('surface_easting_m',0):,.3f} m ({project.get('surface_easting_m',0)*M_TO_FT:,.2f} ft) • Northing {project.get('surface_northing_m',0):,.3f} m ({project.get('surface_northing_m',0)*M_TO_FT:,.2f} ft)")
     except Exception as e: st.error(f'CRS/reference calculation error: {e}')
-    a,b,c=st.columns(3); project['north_reference']=a.selectbox('Primary north reference',['True North','Grid North','Magnetic North'],index=['True North','Grid North','Magnetic North'].index(project.get('north_reference','Grid North'))); project['depth_reference']=b.selectbox('Depth reference',['MD / TVDSS','MD / TVD']); project['status']=c.selectbox('Project status',['Planning','Draft','Under Review','Approved for Training'],index=['Planning','Draft','Under Review','Approved for Training'].index(project.get('status','Planning')))
+    a,b,c=st.columns(3); project['north_reference']=a.selectbox('Primary north reference',['True North','Grid North','Magnetic North'],index=['True North','Grid North','Magnetic North'].index(project.get('north_reference','Grid North'))); depth_options=['MD / TVDSS','MD / TVD']; project['depth_reference']=b.selectbox('Depth reference',depth_options,index=depth_options.index(project.get('depth_reference','MD / TVDSS'))); project['status']=c.selectbox('Project status',['Planning','Draft','Under Review','Approved for Training'],index=['Planning','Draft','Under Review','Approved for Training'].index(project.get('status','Planning')))
     st.markdown('### Design constraints')
     dc=project['design_constraints']; a,b,c=st.columns(3); dc['max_dls_deg_30m']=dls_100ft_to_30m(a.number_input('Max DLS (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_dls_deg_30m'])))); dc['max_inclination_deg']=b.number_input('Max inclination (°)',0.,180.,float(dc['max_inclination_deg'])); dc['max_build_rate_deg_30m']=dls_100ft_to_30m(c.number_input('Max build rate (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_build_rate_deg_30m']))))
     if st.button('Save project/reference settings',type='primary'): save(); st.success('Saved.')
@@ -277,7 +277,7 @@ elif page=='Survey Manager':
     page_header('Survey Manager', 'DIRECTIONAL', 'Load, normalize and calculate survey trajectories while preserving the selected azimuth reference and uncertainty assumptions.')
     sm=project['survey_metadata']; ref=project['reference_data']
     req=reference_requirements(project.get('north_reference','Grid North')); st.info(f"**Primary reference: {req['reference']}** — {req['label']}")
-    a,b,c=st.columns(3); sm['azimuth_reference']=a.selectbox('Input azimuth reference',['Magnetic North','True North','Grid North'],index=['Magnetic North','True North','Grid North'].index(sm['azimuth_reference'])); sm['survey_tool']=b.selectbox('Survey tool',['MWD','Gyro','Wireline','Planned','Other']); sm['survey_method']=c.selectbox('Calculation method',['Minimum Curvature','Average Angle','Balanced Tangential'])
+    a,b,c=st.columns(3); sm['azimuth_reference']=a.selectbox('Input azimuth reference',['Magnetic North','True North','Grid North'],index=['Magnetic North','True North','Grid North'].index(sm['azimuth_reference'])); tool_options=['MWD','Gyro','Wireline','Planned','Other']; sm['survey_tool']=b.selectbox('Survey tool',tool_options,index=tool_options.index(sm.get('survey_tool','MWD'))); method_options=['Minimum Curvature','Average Angle','Balanced Tangential']; sm['survey_method']=c.selectbox('Calculation method',method_options,index=method_options.index(sm.get('survey_method','Minimum Curvature')))
     st.caption('Survey position uncertainty is now represented by a covariance-based development model. Configure the survey error parameters on the Anti-Collision page; a legacy scalar sigma remains in the project schema only for backward compatibility.')
     df=pd.DataFrame(project.get('surveys',[])); display_df=(df.copy() if not df.empty else pd.DataFrame([{'MD':0.,'Inc':0.,'Azi':0.}]))
     if 'MD' in display_df.columns: display_df['MD']=display_df['MD']*M_TO_FT
@@ -287,11 +287,15 @@ elif page=='Survey Manager':
         try:
             w=edited[['MD','Inc','Azi']].copy(); w['MD']=w['MD']*FT_TO_M
             dec=ref.get('magnetic_declination_deg'); conv=ref.get('grid_convergence_deg')
-            if req['needs_declination'] and dec is None and sm['azimuth_reference'] != project.get('north_reference','Grid North'):
+            input_ref=sm['azimuth_reference']
+            project_ref=project.get('north_reference','Grid North')
+            needs_declination=(input_ref != project_ref and 'Magnetic North' in (input_ref, project_ref))
+            needs_convergence=(input_ref != project_ref and 'Grid North' in (input_ref, project_ref))
+            if needs_declination and dec is None:
                 raise ValueError('Magnetic declination is not calculated. Run Geomagnetics before converting magnetic/true survey azimuths.')
-            if req['needs_convergence'] and conv is None and sm['azimuth_reference'] != project.get('north_reference','Grid North'):
-                raise ValueError('Grid convergence is not calculated. Run Geodesy before converting survey azimuths to Grid North.')
-            w['Azi']=w['Azi'].map(lambda x: convert_to_project_reference(x, sm['azimuth_reference'], project.get('north_reference','Grid North'), float(dec or 0), float(conv or 0)))
+            if needs_convergence and conv is None:
+                raise ValueError('Grid convergence is not calculated. Run Geodesy before converting grid/true survey azimuths.')
+            w['Azi']=w['Azi'].map(lambda x: convert_to_project_reference(x,input_ref,project_ref,float(dec or 0.0) if needs_declination else 0.0,float(conv or 0.0) if needs_convergence else 0.0))
             result=minimum_curvature(w,interval); result['TVDSS']=float(project.get('kb_m',0))-result['TVD']
             uparams=sm.setdefault('survey_error_parameters', {'sigma_md_ft':0.5,'sigma_inc_deg':0.10,'sigma_azi_deg':0.25,'sigma_inc_systematic_deg':0.10,'sigma_azi_systematic_deg':0.25,'sigma_surface_ft':5.0})
             cov=station_covariances(w, **uparams)
@@ -460,7 +464,7 @@ elif page=='Geomagnetics':
             r=wmm2025(lat,lon,alt,dt) if model=='WMM2025' else igrf14(lat,lon,alt,dt)
             ref=project['reference_data']; ref.update({'magnetic_declination_deg':r['D'],'magnetic_dip_deg':r['I'],'magnetic_total_field_nT':r['F'],'magnetic_horizontal_field_nT':r['H'],'magnetic_x_nT':r['X'],'magnetic_y_nT':r['Y'],'magnetic_z_nT':r['Z']})
             project.setdefault('model_metadata',{}).setdefault('results',{})[model] = r
-            project['model_metadata'][model]=r['metadata']; project['model_metadata']['active_geomagnetic_model']=model
+            project['model_metadata'][model]=r['metadata']; project['model_metadata']['active_geomagnetic_model']=model; ref['geomagnetic_model']=model; ref['geomagnetic_model_metadata']=r['metadata']
             save(); st.success(f'{model} result stored.')
         except Exception as e: st.error(f'{model} calculation failed: {e}')
     stored=project.get('model_metadata',{}).get('results',{}).get(model)
@@ -805,8 +809,12 @@ elif page=='Visualization':
         show_unc=st.checkbox('Show covariance uncertainty',True)
         show_targets=st.checkbox('Show targets',True)
         show_offsets=st.checkbox('Show offsets',True)
-        cov=_uncertainty_df() if show_unc else pd.DataFrame()
+        cov=_uncertainty_df()
+        if show_unc and cov.empty:
+            st.warning('Survey uncertainty ellipses are unavailable. Check that MD, Inc and Azi are present and that uncertainty parameters are valid.')
         mr=_trajectory_relative(main)
+        main_vs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(mr['N_rel_m'],mr['E_rel_m'])])*M_TO_FT
+        main_tvd_ft=pd.to_numeric(main['TVD'],errors='coerce')*M_TO_FT
         fig=go.Figure()
 
         if view=='Plan':
@@ -822,8 +830,7 @@ elif page=='Visualization':
             fig.update_layout(height=700,title=f"{project['well_name']} — Plan View",margin=dict(l=60,r=30,t=70,b=60),legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0))
 
         elif view=='Vertical Section':
-            main_vs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(mr['N_rel_m'],mr['E_rel_m'])])*M_TO_FT
-            fig.add_trace(go.Scatter(x=main_vs,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],line=dict(width=3),marker=dict(size=4)))
+            fig.add_trace(go.Scatter(x=main_vs,y=main_tvd_ft,mode='lines+markers',name=project['well_name'],line=dict(width=3),marker=dict(size=4)))
             vs_x=[]; vs_y=[]
             vs_x.extend(main_vs.tolist()); vs_y.extend((main['TVD']*M_TO_FT).tolist())
             if show_offsets:
@@ -860,8 +867,7 @@ elif page=='Visualization':
         else:  # Wall Plot
             wall=make_subplots(rows=1,cols=2,subplot_titles=('Plan View','Vertical Section'),horizontal_spacing=0.10)
             wall.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],legendgroup='main',line=dict(width=3),marker=dict(size=3)),row=1,col=1)
-            main_vs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(mr['N_rel_m'],mr['E_rel_m'])])*M_TO_FT
-            wall.add_trace(go.Scatter(x=main_vs,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],legendgroup='main',showlegend=False,line=dict(width=3),marker=dict(size=3)),row=1,col=2)
+            wall.add_trace(go.Scatter(x=main_vs,y=main_tvd_ft,mode='lines+markers',name=project['well_name'],legendgroup='main',showlegend=False,line=dict(width=3),marker=dict(size=3)),row=1,col=2)
             if show_offsets:
                 for off in project.get('offsets',[]):
                     _add_offset_plan(wall,off,row=1,col=1)
@@ -900,13 +906,36 @@ elif page=='Visualization':
             'north_reference':project.get('north_reference','Grid North'),'vertical_section_azimuth_deg_grid':round(float(vs_az),6),
             'target':selected_target.get('name') if selected_target else None,
             'declination_deg':project.get('reference_data',{}).get('magnetic_declination_deg'),'grid_convergence_deg':project.get('reference_data',{}).get('grid_convergence_deg'),
-            'geomagnetic_model':project.get('reference_data',{}).get('geomagnetic_model'),'trajectory_stations':int(len(main)),
+            'geomagnetic_model':project.get('reference_data',{}).get('geomagnetic_model'),
+            'geomagnetic_model_metadata':project.get('reference_data',{}).get('geomagnetic_model_metadata'),
+            'trajectory_stations':int(len(main)),
             'offset_wells':int(len(project.get('offsets',[]))),'targets':int(len(targets)),'uncertainty_model':project.get('survey_metadata',{}).get('uncertainty_model',''),
-            'uncertainty_plotted':bool(show_unc),'wall_plot_coordinate_frame':'Well-relative local grid; WN-01 wellhead = (0,0) ft','export_generated_utc':datetime.utcnow().isoformat()+'Z'
+            'uncertainty_plotted':bool(show_unc and not cov.empty),'uncertainty_available':bool(not cov.empty),
+            'wall_plot_coordinate_frame':'Well-relative local grid; WN-01 wellhead = (0,0) ft','export_generated_utc':datetime.utcnow().isoformat()+'Z'
         }
         # Always export the full wall plot with all three optional engineering layers,
         # independent of the current interactive checkbox state, so the package is a
         # reproducible deliverable rather than a screenshot of the current UI state.
+        # Export geometry and bounds are computed independently of the selected interactive view.
+        ex_xmin,ex_xmax,ex_ymin,ex_ymax=_plan_bounds()
+        ex_vs=main_vs.tolist()
+        ex_tvd=(pd.to_numeric(main['TVD'],errors='coerce')*M_TO_FT).tolist()
+        for off in project.get('offsets',[]):
+            od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
+            if {'N_rel_m','E_rel_m','TVD'}.issubset(od.columns):
+                ovs=np.array([_vs_project(n,e,vs_az)[0] for n,e in zip(od['N_rel_m'],od['E_rel_m'])])*M_TO_FT
+                ex_vs.extend(ovs.tolist())
+                ex_tvd.extend((pd.to_numeric(od['TVD'],errors='coerce')*M_TO_FT).tolist())
+        for t in targets:
+            rt=_target_relative(t); n,e=target_boundary(rt)
+            ex_vs.extend((np.array([_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)])*M_TO_FT).tolist())
+            ex_tvd.append(_target_tvd(t)*M_TO_FT)
+        ex_vs=[float(v) for v in ex_vs if pd.notna(v)]
+        ex_tvd=[float(v) for v in ex_tvd if pd.notna(v)]
+        ex_vxmin,ex_vxmax=min(ex_vs),max(ex_vs)
+        ex_vymin,ex_vymax=min(ex_tvd),max(ex_tvd)
+        ex_vpx=max(50.0,0.08*(ex_vxmax-ex_vxmin))
+        ex_vpy=max(50.0,0.05*(ex_vymax-ex_vymin))
         export_wall=make_subplots(rows=1,cols=2,subplot_titles=('Plan View','Vertical Section'),horizontal_spacing=0.10)
         export_wall.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],line=dict(width=3)),row=1,col=1)
         export_wall.add_trace(go.Scatter(x=main_vs,y=main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],showlegend=False,line=dict(width=3)),row=1,col=2)
@@ -921,8 +950,8 @@ elif page=='Visualization':
             rt=_target_relative(t); n,e=target_boundary(rt); tx=np.array([_vs_project(nn,ee,vs_az)[0] for nn,ee in zip(n,e)])*M_TO_FT; ty=np.full(len(tx),_target_tvd(t)*M_TO_FT); nm=t.get('name','Target')
             export_wall.add_trace(go.Scatter(x=tx,y=ty,mode='lines+markers',name=nm,showlegend=False,line=dict(dash='dash',width=2)),row=1,col=2)
         _add_uncertainty_plan(export_wall,cov,row=1,col=1,showlegend=True)
-        export_wall.update_xaxes(title_text='Relative Easting (ft)',range=[xmin,xmax],row=1,col=1); export_wall.update_yaxes(title_text='Relative Northing (ft)',range=[ymin,ymax],scaleanchor='x',scaleratio=1,row=1,col=1)
-        export_wall.update_xaxes(title_text=f'Vertical Section @ {vs_az:.2f}° Grid (ft)',range=[vxmin-vpx,vxmax+vpx],row=1,col=2); export_wall.update_yaxes(title_text='TVD (ft)',range=[vymax+vpy,vymin-vpy],row=1,col=2)
+        export_wall.update_xaxes(title_text='Relative Easting (ft)',range=[ex_xmin,ex_xmax],row=1,col=1); export_wall.update_yaxes(title_text='Relative Northing (ft)',range=[ex_ymin,ex_ymax],scaleanchor='x',scaleratio=1,row=1,col=1)
+        export_wall.update_xaxes(title_text=f'Vertical Section @ {vs_az:.2f}° Grid (ft)',range=[ex_vxmin-ex_vpx,ex_vxmax+ex_vpx],row=1,col=2); export_wall.update_yaxes(title_text='TVD (ft)',range=[ex_vymax+ex_vpy,ex_vymin-ex_vpy],row=1,col=2)
         export_wall.update_layout(height=760,title=f"{project['well_name']} — Wall Plot",margin=dict(l=50,r=30,t=90,b=85),legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0))
         export_wall.add_annotation(text=f"CRS: {project.get('crs','—')} | North reference: {project.get('north_reference','Grid North')} | VS azimuth: {vs_az:.2f}° Grid | Declination: {project.get('reference_data',{}).get('magnetic_declination_deg','—')}° | Convergence: {project.get('reference_data',{}).get('grid_convergence_deg','—')}°",xref='paper',yref='paper',x=0,y=-0.13,showarrow=False,align='left')
         html=export_wall.to_html(full_html=True,include_plotlyjs=True)
