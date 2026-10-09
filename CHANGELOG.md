@@ -62,3 +62,11 @@
 - Updated Anti-Collision to compare trajectories in a common project frame and assess separation using directional relative uncertainty.
 - Updated plan visualization to display stationwise 1-sigma uncertainty ellipses and keep main/offset wells in a common relative plotting frame.
 - Explicitly labels the implementation as engineering-development screening, not an ISCWSA-certified error model.
+
+
+## v6.4 — Anti-collision uncertainty and trajectory profile correction
+- Corrected random angular-error covariance propagation so numerical perturbations and variances use the same degree units as the survey calculation. This prevents angular uncertainty from being artificially suppressed.
+- Anti-collision treats zero/invalid propagated uncertainty as a review condition and reports incomplete comparisons explicitly instead of showing an all-clear banner when rows remain under review.
+- Added trajectory profile generation for Vertical, J-Profile, S-Profile, Build & Hold, Build-Hold-Drop, Horizontal, ERD and Custom. The selected profile now generates a different inclination-versus-MD trajectory when Generate is pressed.
+- Added a project maximum-inclination check for generated profiles.
+- These remain engineering-development calculations, not ISCWSA-certified anti-collision or a full target-constrained trajectory optimizer.

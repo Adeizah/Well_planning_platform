@@ -9,7 +9,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from core.project import new_project, project_to_json, project_from_json, validate_project
-from core.trajectory import minimum_curvature, build_constant_build_hold, solve_build_hold_hold_inclination
+from core.trajectory import minimum_curvature, build_constant_build_hold, solve_build_hold_hold_inclination, generate_profile_candidate
 from core.geometry import target_boundary
 from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to_magnetic, magnetic_to_grid, grid_to_magnetic, reference_requirements, convert_to_project_reference
 from models.geomagnetic import wmm2025, igrf14
@@ -338,25 +338,30 @@ elif page=='Trajectory Planner':
     default_az=(math.degrees(math.atan2(rel_e,rel_n))%360.0) if abs(rel_n)+abs(rel_e)>1e-9 else 0.0
     max_inc=float(project.get('design_constraints',{}).get('max_inclination_deg',57.0) or 57.0)
     default_hold=min(57.0,max_inc)
-    a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold_mode=c.selectbox('Hold inclination mode',['Manual','Solve to target']); hold=c.number_input('Hold inclination (°)',1.,max(1.0,max_inc),default_hold,help='Manual candidate hold angle. It cannot exceed the project maximum inclination.') if hold_mode=='Manual' else default_hold; az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
+    profile_options=['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom']
+    saved_profile=project.get('well_design','Build & Hold')
+    profile_default=saved_profile if saved_profile in profile_options else 'Build & Hold'
+    profile=st.selectbox('Well trajectory shape',profile_options,index=profile_options.index(profile_default),help='This selection controls the inclination-versus-MD profile generated when you press Generate trajectory.')
+    a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold=c.number_input('Peak/hold inclination (°)',1.,max(1.0,max_inc),default_hold,help='Peak inclination for the selected profile. Horizontal uses 90°; ERD uses at least 75° and is capped at 88°.'); az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
+    a,b=st.columns(2); dr_ft=a.number_input('Drop rate (°/100 ft)',.1,15.,3.0,help='Used by S-Profile and Build-Hold-Drop.'); final_inc=b.number_input('Final inclination after drop (°)',0.,max(1.0,max_inc),0.0,help='Used by S-Profile and Build-Hold-Drop.')
     a,b,c=st.columns(3); a.number_input('Target TVD (ft)',0.,49213.,target_tvd*M_TO_FT,disabled=True); b.number_input('Target Northing offset (ft)',-3280840.,3280840.,rel_n*M_TO_FT,disabled=True); c.number_input('Target Easting offset (ft)',-3280840.,3280840.,rel_e*M_TO_FT,disabled=True)
     st.caption(f'Maximum inclination constraint: **{max_inc:.1f}°** • Target azimuth from project-grid geometry: **{default_az:.2f}° Grid**')
     kop=kop_ft*FT_TO_M; br=dls_100ft_to_30m(br_ft); td=target_tvd; n=rel_n; e=rel_e
     if target_tvd <= 0: st.error('Target TVD must be positive after applying the KB/TVDSS reference conversion.'); st.stop()
     max_build_ft=dls_30m_to_100ft(float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',br)))
     if br_ft > max_build_ft+1e-9: st.warning(f'Build rate exceeds the project maximum build-rate constraint of {max_build_ft:.2f}°/100 ft.')
-    if hold_mode=='Manual' and hold > max_inc: st.error('Hold inclination exceeds the project maximum inclination constraint.')
-    if abs(az-default_az)>0.05: st.warning(f'Planning azimuth differs from the target-center azimuth by {abs(az-default_az):.2f}°. The candidate will not be target-center aligned without additional directional correction.')
-    if st.button('Generate build/hold candidate',type='primary'):
+    if profile not in ('Vertical',) and hold > max_inc and profile not in ('Horizontal',): st.error('Peak/hold inclination exceeds the project maximum inclination constraint.')
+    if abs(az-default_az)>0.05: st.warning(f'Planning azimuth differs from the target-center azimuth by {abs(az-default_az):.2f}°. The candidate may not be target-center aligned.')
+    st.caption(f'Current design preset: **{saved_profile}**. Selected calculation profile: **{profile}**. The stored survey changes only when you generate the trajectory.')
+    if st.button('Generate trajectory for selected shape',type='primary'):
         try:
-            if hold_mode=='Solve to target':
-                out,meta=solve_build_hold_hold_inclination(kop,br,max_inc,az,td,n,e,station_interval=30)
-                hold=float(meta['hold_inclination_deg'])
-            else:
-                out,meta=build_constant_build_hold(kop,br,hold,az,td,n,e,station_interval=30)
-            project['surveys']=out.to_dict('records'); project['trajectory_metadata']={'planner':'Constant Build + Hold','planner_result':meta,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z'}; save()
-            st.success(f"Planner status: {meta['status']} • lateral error {meta['lateral_error_m']*M_TO_FT:.1f} ft • TVD error {meta['tvd_error_m']*M_TO_FT:.1f} ft • hold {hold:.2f}°")
-            b1,b2,b3,b4=st.columns(4); b1.metric('Build end / EOB',f"{meta['build_end_md_m']*M_TO_FT:,.0f} ft"); b2.metric('Build length',f"{meta['build_length_m']*M_TO_FT:,.0f} ft"); b3.metric('Final MD',f"{meta['final_md_m']*M_TO_FT:,.0f} ft"); b4.metric('Hold margin',f"{meta.get('hold_inclination_margin_deg',max_inc-hold):.1f}°")
+            requested_peak = 0.0 if profile == 'Vertical' else (90.0 if profile == 'Horizontal' else (min(max(hold,75.0),88.0) if profile == 'ERD' else hold))
+            if requested_peak > max_inc + 1e-9:
+                raise ValueError(f'{profile} requires a peak inclination of {requested_peak:.1f}°, above the project maximum inclination of {max_inc:.1f}°. Update the design constraint first if this profile is intended.')
+            out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30)
+            project['surveys']=out.to_dict('records'); project['well_design']=profile; project['trajectory_metadata']={'planner':'Piecewise profile candidate','planner_result':meta,'profile':profile,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z'}; save()
+            st.success(f"Profile: {profile} • status {meta['status']} • lateral error {meta['lateral_error_m']*M_TO_FT:.1f} ft • TVD error {meta['tvd_error_m']*M_TO_FT:.1f} ft • final inclination {meta['final_inclination_deg']:.2f}°")
+            b1,b2,b3,b4=st.columns(4); b1.metric('Build end / EOB',f"{meta['build_end_md_m']*M_TO_FT:,.0f} ft"); b2.metric('Build length',f"{meta['build_length_m']*M_TO_FT:,.0f} ft"); b3.metric('Final MD',f"{meta['final_md_m']*M_TO_FT:,.0f} ft"); b4.metric('Final inclination',f"{meta['final_inclination_deg']:.1f}°")
             out_display=out.copy(); [out_display.__setitem__(cc,out_display[cc]*M_TO_FT) for cc in ['MD','TVD','Northing','Easting','VS'] if cc in out_display.columns]; out_display['TVDSS']=(float(project.get('kb_m',0))-out['TVD'])*M_TO_FT; out_display['DLS']=out_display['DLS'].map(lambda x:dls_for_interval_to_100ft(x,30.0)); st.dataframe(out_display,use_container_width=True,hide_index=True)
         except Exception as ex: st.error(str(ex))
 
@@ -539,6 +544,8 @@ elif page=='Anti-Collision':
     sigma_inc_sys=a.number_input('Systematic inclination σ (°)',0.0,5.0,float(params.get('sigma_inc_systematic_deg',0.10)),step=0.01,help='Illustrative correlated inclination bias applied coherently along the trajectory.')
     sigma_azi_sys=b.number_input('Systematic azimuth σ (°)',0.0,10.0,float(params.get('sigma_azi_systematic_deg',0.25)),step=0.05,help='Illustrative correlated azimuth bias applied coherently along the trajectory.')
     sigma_surface_ft=c.number_input('Surface position σ (ft)',0.0,100.0,float(params.get('sigma_surface_ft',5.0)),step=0.5,help='Illustrative 1-sigma surface-position uncertainty. A production workflow should derive this from the wellhead positioning/reference survey.')
+    if sigma_surface_ft <= 0.0:
+        st.warning('Surface position σ is 0 ft. If the closest approach occurs at MD = 0, propagated relative uncertainty will be zero and the result must remain REVIEW. Enter a non-zero value only when justified by the wellhead positioning uncertainty.')
     params.update({'sigma_md_ft':sigma_md_ft,'sigma_inc_deg':sigma_inc_deg,'sigma_azi_deg':sigma_azi_deg,'sigma_inc_systematic_deg':sigma_inc_sys,'sigma_azi_systematic_deg':sigma_azi_sys,'sigma_surface_ft':sigma_surface_ft})
     st.caption('The model combines independent station errors with correlated systematic inclination/azimuth biases and a surface-position covariance. It produces stationwise 3D covariance/uncertainty ellipses, but remains an engineering-development model rather than an ISCWSA error model.')
     st.markdown('### Screening readiness')
@@ -566,9 +573,16 @@ elif page=='Anti-Collision':
                         if col in disp: disp[col.replace('_m','_ft')]=disp[col]*M_TO_FT; disp.drop(columns=[col],inplace=True)
                     disp=disp.rename(columns={'main_md_ft':'Main MD (ft)','offset_md_ft':'Offset MD (ft)','separation_ft':'Min separation (ft)','horizontal_separation_ft':'Horizontal separation (ft)','vertical_separation_ft':'Vertical separation (ft)','directional_uncertainty_ft':'Directional 1σ uncertainty (ft)','separation_factor':'Separation factor','status':'Status','offset':'Offset well'})
                     st.dataframe(disp,use_container_width=True,hide_index=True)
-                    alerts=disp[disp['Status'].isin(['ALERT','WARNING'])]
-                    if len(alerts): st.warning(f'{len(alerts)} offset comparison(s) require review.')
-                    else: st.success('All valid offset comparisons meet the illustrative covariance screening threshold.')
+                    review_statuses={'ALERT','WARNING','REVIEW','NOT CHECKED'}
+                    alerts=disp[disp['Status'].isin(review_statuses)]
+                    passed=int((disp['Status']=='PASS').sum())
+                    incomplete=int(disp['Status'].isin(['REVIEW','NOT CHECKED']).sum())
+                    if incomplete:
+                        st.error(f'Screening incomplete: {passed} comparison(s) passed; {incomplete} comparison(s) have missing/invalid uncertainty or trajectory data and require review.')
+                    elif len(alerts):
+                        st.warning(f'{passed} comparison(s) passed; {len(alerts)} comparison(s) are WARNING/ALERT and require review.')
+                    else:
+                        st.success(f'All {passed} valid offset comparisons meet the illustrative covariance screening threshold. This is not operational clearance.')
                     st.caption('Screening only. Production anti-collision requires a validated ISCWSA error model, covariance propagation and company-approved separation rules.')
             except Exception as e: st.error(f'Covariance clearance scan failed: {e}')
 
