@@ -45,3 +45,20 @@ def test_geomagnetic_and_uncertainty_export_metadata_are_explicit():
     assert "'uncertainty_plotted':bool(show_unc and not cov.empty)" in text
     assert "'uncertainty_available':bool(not cov.empty)" in text
     assert "Survey uncertainty ellipses are unavailable." in text
+
+
+def test_visualization_derives_coordinates_for_md_inc_azi_only_offsets():
+    text = _app_text()
+    assert "if not {'Easting','Northing','TVD'}.issubset(out.columns):" in text
+    assert "if {'MD','Inc','Azi'}.issubset(out.columns):" in text
+    assert "out=minimum_curvature(out, dls_interval=interval)" in text
+
+
+def test_trajectory_planner_exposes_target_optimization_mode():
+    text = _app_text()
+    assert "Optimize selected profile to target" in text
+    assert "optimize_trajectory(" in text
+    assert "profile=profile" in text
+    assert "Profile-aware multi-parameter optimizer" in text
+    assert "Import offset survey CSV" in text
+    assert "App theme" in text
