@@ -163,7 +163,7 @@ def trajectory_3d(df):
 def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg,
                                hold_azi_deg, target_tvd, target_north, target_east,
                                drop_rate_deg_30m=None, final_inc_deg=0.0,
-                               station_interval=30.0, max_md=15000.0):
+                               station_interval=30.0, max_md=15000.0, drop_start_md=None):
     """Generate a transparent piecewise-constant-rate trajectory profile.
 
     This is a planning candidate generator, not a full target-constrained
@@ -190,6 +190,11 @@ def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg
         raise ValueError("KOP must be non-negative and below maximum MD.")
 
     if profile == "Vertical":
+        peak_inc = 0.0
+        post_profile = 'hold'
+        build_len = 0.0
+        build_end = 0.0
+        drop_start = None
         end_md = min(max_md, max(target_tvd, station_interval))
         mds = np.arange(0.0, end_md, station_interval).tolist() + [end_md]
         incs = [0.0] * len(mds)
@@ -202,7 +207,7 @@ def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg
             post_profile = "hold"
         else:
             peak_inc = hold
-            post_profile = "drop" if profile in ("S-Profile", "Build-Hold-Drop") else "hold"
+            post_profile = "drop" if profile in ("S-Profile", "Build-Hold-Drop", "Custom") else "hold"
         build_len = abs(peak_inc) / br * 30.0
         build_end = kop + build_len
         if build_end > max_md:
@@ -215,7 +220,8 @@ def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg
             cos_peak = max(abs(np.cos(np.radians(peak_inc))), 0.05)
             estimated_hold = max(0.0, (target_tvd - build_end * 0.8) / cos_peak)
             hold_len = max(0.0, 0.70 * estimated_hold)
-            drop_start = min(max_md-drop_len, build_end + hold_len)
+            estimated_drop_start = min(max_md-drop_len, build_end + hold_len)
+            drop_start = estimated_drop_start if drop_start_md is None else min(max_md-drop_len, max(build_end, float(drop_start_md)))
         mds = np.arange(0.0, max_md, station_interval).tolist()
         if not mds or mds[0] != 0.0: mds.insert(0, 0.0)
         mds = sorted(set([float(x) for x in mds] + [float(kop), float(build_end)] + ([float(drop_start), float(drop_start+drop_len)] if drop_start is not None else [])))
