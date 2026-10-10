@@ -386,6 +386,12 @@ elif page=='Trajectory Planner':
     a,b,c=st.columns(3); a.number_input('Target TVD (ft)',0.,49213.,target_tvd*M_TO_FT,disabled=True); b.number_input('Target Northing offset (ft)',-3280840.,3280840.,rel_n*M_TO_FT,disabled=True); c.number_input('Target Easting offset (ft)',-3280840.,3280840.,rel_e*M_TO_FT,disabled=True)
     st.caption(f'Maximum inclination constraint: **{max_inc:.1f}°** • Target azimuth from project-grid geometry: **{default_az:.2f}° Grid**')
     kop=kop_ft*FT_TO_M; br=dls_100ft_to_30m(br_ft); td=target_tvd; n=rel_n; e=rel_e
+    configured_td=project.get('well_architecture',{}).get('planned_td_md_m')
+    provisional_md_limit=float(configured_td) if configured_td else max(td + 2000.0, td * 2.0)
+    if not configured_td:
+        st.info(f'No planned TD MD is configured. For this calculation, a provisional trajectory limit of {provisional_md_limit*M_TO_FT:,.0f} ft MD is used (based on target TVD). Set the actual planned TD in Well Architecture for a design-specific limit.')
+    elif float(configured_td) <= td:
+        st.warning('Configured planned TD MD is at or shallower than target TVD. A target hit may be impossible; check the well architecture and depth references.')
     if target_tvd <= 0: st.error('Target TVD must be positive after applying the KB/TVDSS reference conversion.'); st.stop()
     max_build_ft=dls_30m_to_100ft(float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',br)))
     if br_ft > max_build_ft+1e-9: st.warning(f'Build rate exceeds the project maximum build-rate constraint of {max_build_ft:.2f}°/100 ft.')
@@ -411,14 +417,20 @@ elif page=='Trajectory Planner':
                     max_turn_rate_deg_30m=float(project.get('design_constraints',{}).get('max_turn_rate_deg_30m',3.0) or 3.0),
                     drop_rate_initial_deg_30m=dls_100ft_to_30m(dr_ft), final_inc_initial_deg=final_inc,
                     target_geometry=target_geometry, point_tolerance_m=30.48,
-                    station_interval_m=60.0, max_md_m=float(project.get('well_architecture',{}).get('planned_td_md_m') or 15000.0),
+                    station_interval_m=60.0, max_md_m=provisional_md_limit,
                 )
                 meta=dict(meta); meta['planning_mode']='Optimize selected profile to target'
             else:
-                out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,truncate_at_target=False)
+                out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,max_md=provisional_md_limit,truncate_at_target=False)
                 meta=dict(meta); meta['planning_mode']='Manual profile'
             project['surveys']=out.to_dict('records'); project['well_design']=profile; project['trajectory_metadata']={'planner':'Profile-aware multi-parameter optimizer' if planning_mode=='Optimize selected profile to target' else 'Piecewise profile candidate','planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z'}; save()
-            st.success(f"Profile: {profile} • status {meta['status']} • lateral error {meta['lateral_error_m']*M_TO_FT:.1f} ft • TVD error {meta['tvd_error_m']*M_TO_FT:.1f} ft • final inclination {meta['final_inclination_deg']:.2f}°")
+            result_line=f"Profile: {profile} • status {meta['status']} • lateral error {meta['lateral_error_m']*M_TO_FT:.1f} ft • TVD error {meta['tvd_error_m']*M_TO_FT:.1f} ft • final inclination {meta['final_inclination_deg']:.2f}°"
+            if meta['status']=='PASS': st.success(result_line)
+            else: st.warning(result_line + ' • Target/profile feasibility needs review.')
+            if meta.get('target_intercept_md_m') is not None:
+                st.caption(f"Target TVD crossing: {meta['target_intercept_md_m']*M_TO_FT:,.1f} ft MD • target miss beyond tolerance: {meta.get('target_miss_distance_m', max(0.0,meta['lateral_error_m']-30.48))*M_TO_FT:,.1f} ft")
+            elif planning_mode=='Manual profile':
+                st.caption('The generated path did not cross the target TVD within the available trajectory depth.')
             if planning_mode=='Optimize selected profile to target':
                 st.metric('Optimization outcome', meta.get('optimization_status','REVIEW'))
                 st.caption(f"Objective score: {meta.get('objective_m', float('nan')):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {meta.get('max_dls_deg_30m', float('nan')):.2f}°/30 m")
