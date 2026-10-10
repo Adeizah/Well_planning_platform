@@ -261,8 +261,16 @@ def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg
     eval_point = target_crossing if target_crossing is not None else end
     lateral_error = float(np.hypot(float(eval_point["Northing"])-target_north, float(eval_point["Easting"])-target_east))
     tvd_error = float(eval_point["TVD"]-target_tvd) if target_crossing is not None else float(end["TVD"]-target_tvd)
+    drop_end_for_check = (float(drop_start + drop_len)
+                          if drop_start is not None and post_profile == "drop" else None)
+    section_order_ok = (drop_end_for_check is None or target_crossing is None
+                        or float(target_crossing["MD"]) + 1e-6 >= drop_end_for_check)
+    target_hit = lateral_error <= 30.48 and abs(tvd_error) <= 30.48
     result = {
-        "status": "PASS" if lateral_error < 30.48 and abs(tvd_error) < 30.48 else "REVIEW",
+        "status": "PASS" if target_hit and section_order_ok else "REVIEW",
+        "target_hit": bool(target_hit),
+        "section_order_ok": bool(section_order_ok),
+        "target_miss_distance_m": float(max(0.0, lateral_error - 30.48)),
         "profile": profile, "lateral_error_m": lateral_error, "tvd_error_m": tvd_error,
         "build_end_md_m": float(kop + abs(peak_inc)/br*30.0) if profile != "Vertical" else 0.0,
         "build_length_m": float(abs(peak_inc)/br*30.0) if profile != "Vertical" else 0.0,
