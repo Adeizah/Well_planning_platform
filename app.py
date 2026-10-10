@@ -261,7 +261,12 @@ elif page=='Project & Reference':
     project['field']=a.text_input('Field / Asset',project.get('field',''))
     project['site_pad']=b.text_input('Site / Pad',project.get('site_pad',''))
     project['well_purpose']=c.selectbox('Well purpose',['Exploration','Appraisal','Development','Injection','Sidetrack','Other'],index=['Exploration','Appraisal','Development','Injection','Sidetrack','Other'].index(project.get('well_purpose','Development')))
-    project['well_design']=d.selectbox('Well design',['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'],index=['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'].index(project.get('well_design','Build & Hold')))
+    profile_options=['Vertical','J-Profile','S-Profile','Horizontal','ERD','Custom']
+    profile_labels={'J-Profile':'J-profile / Build & Hold','S-Profile':'S-profile / Build-Hold-Drop'}
+    saved_design=project.get('well_design','J-Profile')
+    saved_design={'Build & Hold':'J-Profile','Build-Hold-Drop':'S-Profile'}.get(saved_design,saved_design)
+    if saved_design not in profile_options: saved_design='J-Profile'
+    project['well_design']=d.selectbox('Well design',profile_options,index=profile_options.index(saved_design),format_func=lambda x:profile_labels.get(x,x),help='This is the shared well-design preset used by the Trajectory Planner. J-profile and Build & Hold are treated as the same profile; S-profile and Build-Hold-Drop are treated as the same profile.')
 
     st.markdown('### Location & coordinate system')
     a,b,c=st.columns(3); project['latitude']=a.number_input('Latitude (°)',-90.,90.,float(project['latitude']),format='%.6f'); project['longitude']=b.number_input('Longitude (°)',-180.,180.,float(project['longitude']),format='%.6f'); project['elevation_m']=c.number_input('Wellhead elevation (ft)',-6500.,33000.,float(project['elevation_m'])*3.280839895) / 3.280839895
@@ -365,10 +370,15 @@ elif page=='Trajectory Planner':
     default_az=(math.degrees(math.atan2(rel_e,rel_n))%360.0) if abs(rel_n)+abs(rel_e)>1e-9 else 0.0
     max_inc=float(project.get('design_constraints',{}).get('max_inclination_deg',57.0) or 57.0)
     default_hold=min(57.0,max_inc)
-    profile_options=['Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom']
-    saved_profile=project.get('well_design','Build & Hold')
-    profile_default=saved_profile if saved_profile in profile_options else 'Build & Hold'
-    profile=st.selectbox('Well trajectory shape',profile_options,index=profile_options.index(profile_default),help='This selection controls the inclination-versus-MD profile generated when you press Generate trajectory.')
+    profile_options=['Vertical','J-Profile','S-Profile','Horizontal','ERD','Custom']
+    profile_labels={'J-Profile':'J-profile / Build & Hold','S-Profile':'S-profile / Build-Hold-Drop'}
+    saved_profile=project.get('well_design','J-Profile')
+    saved_profile={'Build & Hold':'J-Profile','Build-Hold-Drop':'S-Profile'}.get(saved_profile,saved_profile)
+    profile_default=saved_profile if saved_profile in profile_options else 'J-Profile'
+    profile=st.selectbox('Well trajectory shape',profile_options,index=profile_options.index(profile_default),format_func=lambda x:profile_labels.get(x,x),help='J-profile and Build & Hold share one geometry. S-profile and Build-Hold-Drop share one geometry. This selection is also stored as the shared Well design preset on Project & Reference.')
+    # Keep the design preset synchronized immediately, not only after calculation.
+    project['well_design']=profile
+    save()
     if profile=='Custom': st.info('Custom currently uses a configurable build–hold–drop template. Optimization searches KOP, build rate, peak inclination, azimuth, drop start, drop rate and final inclination. Arbitrary user-defined multi-section control points are not yet implemented.')
     planning_mode=st.radio('Planning mode',['Manual profile','Optimize selected profile to target'],horizontal=True,help='The optimizer searches profile-specific parameters including KOP, build rate, peak inclination and azimuth; S/Build-Hold-Drop also optimize drop rate and final inclination. It reports REVIEW if the target or constraints are not satisfied.')
     a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold=c.number_input('Peak/hold inclination (°)',1.,max(1.0,max_inc),default_hold,help='Peak inclination for the selected profile. Horizontal uses 90°; ERD uses at least 75° and is capped at 88°. In optimization mode this is the initial/default inclination; the optimizer searches within the permitted range.'); az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
@@ -405,7 +415,7 @@ elif page=='Trajectory Planner':
                 )
                 meta=dict(meta); meta['planning_mode']='Optimize selected profile to target'
             else:
-                out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30)
+                out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,truncate_at_target=False)
                 meta=dict(meta); meta['planning_mode']='Manual profile'
             project['surveys']=out.to_dict('records'); project['well_design']=profile; project['trajectory_metadata']={'planner':'Profile-aware multi-parameter optimizer' if planning_mode=='Optimize selected profile to target' else 'Piecewise profile candidate','planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z'}; save()
             st.success(f"Profile: {profile} • status {meta['status']} • lateral error {meta['lateral_error_m']*M_TO_FT:.1f} ft • TVD error {meta['tvd_error_m']*M_TO_FT:.1f} ft • final inclination {meta['final_inclination_deg']:.2f}°")
@@ -414,7 +424,31 @@ elif page=='Trajectory Planner':
                 st.caption(f"Objective score: {meta.get('objective_m', float('nan')):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {meta.get('max_dls_deg_30m', float('nan')):.2f}°/30 m")
                 if meta.get('optimization_status') != 'FEASIBLE': st.warning('No candidate met all current target and trajectory constraints. The best candidate is shown for review; constraints have not been relaxed.')
             b1,b2,b3,b4=st.columns(4); b1.metric('Build end / EOB',f"{meta['build_end_md_m']*M_TO_FT:,.0f} ft"); b2.metric('Build length',f"{meta['build_length_m']*M_TO_FT:,.0f} ft"); b3.metric('Final MD',f"{meta['final_md_m']*M_TO_FT:,.0f} ft"); b4.metric('Final inclination',f"{meta['final_inclination_deg']:.1f}°")
-            out_display=out.copy(); [out_display.__setitem__(cc,out_display[cc]*M_TO_FT) for cc in ['MD','TVD','Northing','Easting','VS'] if cc in out_display.columns]; out_display['TVDSS']=(float(project.get('kb_m',0))-out['TVD'])*M_TO_FT; out_display['DLS']=out_display['DLS'].map(lambda x:dls_for_interval_to_100ft(x,30.0)); st.dataframe(out_display,use_container_width=True,hide_index=True)
+            detail=st.radio('Survey table detail',['Section endpoints (compact)','Full survey stations'],horizontal=True,index=0,help='The complete calculated survey is still saved to the project and used by downstream modules. This setting only changes the table shown here.')
+            display_source=out.copy()
+            if detail=='Section endpoints (compact)':
+                section_ends=meta.get('section_end_md_m',{})
+                selected_indices={0,len(display_source)-1}
+                marker_names={}
+                for section_name, section_md in section_ends.items():
+                    if section_md is not None and len(display_source):
+                        marker_idx=int((display_source['MD']-float(section_md)).abs().idxmin())
+                        selected_indices.add(marker_idx)
+                        marker_names.setdefault(marker_idx, []).append(section_name)
+                target_md=meta.get('target_intercept_md_m')
+                if target_md is not None and len(display_source):
+                    marker_idx=int((display_source['MD']-float(target_md)).abs().idxmin())
+                    selected_indices.add(marker_idx)
+                    marker_names.setdefault(marker_idx, []).append('Target intercept (nearest station)')
+                selected_sorted=sorted(selected_indices)
+                display_source=display_source.iloc[selected_sorted].copy()
+                labels=[]
+                for original_idx, rr in zip(selected_sorted, display_source.itertuples()):
+                    names_here=marker_names.get(original_idx, [])
+                    if original_idx==0: names_here=['Start']+names_here
+                    labels.append(' / '.join(dict.fromkeys(names_here)) if names_here else 'Station')
+                display_source.insert(0,'Section / marker',labels)
+            out_display=display_source.copy(); [out_display.__setitem__(cc,out_display[cc]*M_TO_FT) for cc in ['MD','TVD','Northing','Easting','VS'] if cc in out_display.columns]; out_display['TVDSS']=(float(project.get('kb_m',0))-display_source['TVD'])*M_TO_FT; out_display['DLS']=out_display['DLS'].map(lambda x:dls_for_interval_to_100ft(x,30.0)); st.dataframe(out_display,use_container_width=True,hide_index=True)
         except Exception as ex: st.error(str(ex))
 
 # Targets
