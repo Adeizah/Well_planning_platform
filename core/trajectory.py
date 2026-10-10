@@ -163,7 +163,7 @@ def trajectory_3d(df):
 def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg,
                                hold_azi_deg, target_tvd, target_north, target_east,
                                drop_rate_deg_30m=None, final_inc_deg=0.0,
-                               station_interval=30.0, max_md=15000.0, drop_start_md=None):
+                               station_interval=30.0, max_md=15000.0, drop_start_md=None, truncate_at_target=True):
     """Generate a transparent piecewise-constant-rate trajectory profile.
 
     This is a planning candidate generator, not a full target-constrained
@@ -239,16 +239,28 @@ def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg
             else:
                 inc=peak_inc
             incs.append(float(inc))
-        # Trim at first station reaching target TVD, retaining the crossing point.
+        # Keep the complete design path by default for section inspection. Target
+        # interception is evaluated independently from the displayed endpoint.
     azis = [azi] * len(mds)
     rows = pd.DataFrame({"MD": mds, "Inc": incs, "Azi": azis})
     out = minimum_curvature(rows, dls_interval=30.0)
     crossed = np.flatnonzero(out["TVD"].to_numpy() >= target_tvd)
+    target_crossing = None
     if len(crossed):
+        j = int(crossed[0])
+        if j == 0:
+            target_crossing = out.iloc[0]
+        else:
+            lo, hi = out.iloc[j-1], out.iloc[j]
+            denom = float(hi['TVD'] - lo['TVD'])
+            f = 0.0 if abs(denom) < 1e-12 else max(0.0, min(1.0, (target_tvd-float(lo['TVD']))/denom))
+            target_crossing = {col: float(lo[col]) + f*(float(hi[col])-float(lo[col])) for col in ['MD','Northing','Easting','TVD','Inc','Azi']}
+    if truncate_at_target and len(crossed):
         out = out.iloc[:int(crossed[0])+1].copy().reset_index(drop=True)
     end = out.iloc[-1]
-    lateral_error = float(np.hypot(float(end["Northing"])-target_north, float(end["Easting"])-target_east))
-    tvd_error = float(end["TVD"]-target_tvd)
+    eval_point = target_crossing if target_crossing is not None else end
+    lateral_error = float(np.hypot(float(eval_point["Northing"])-target_north, float(eval_point["Easting"])-target_east))
+    tvd_error = float(eval_point["TVD"]-target_tvd) if target_crossing is not None else float(end["TVD"]-target_tvd)
     result = {
         "status": "PASS" if lateral_error < 30.48 and abs(tvd_error) < 30.48 else "REVIEW",
         "profile": profile, "lateral_error_m": lateral_error, "tvd_error_m": tvd_error,
@@ -259,6 +271,15 @@ def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg
         "endpoint_tvd_m": float(end["TVD"]), "final_md_m": float(end["MD"]),
         "drop_rate_deg_30m": float(dr) if post_profile == "drop" else None,
         "final_inclination_deg": float(end["Inc"]),
-        "note": "Practice-grade profile generation; verify target fit, DLS, constraints and survey conventions before engineering use."
+        "target_intercept_md_m": float(eval_point["MD"]) if target_crossing is not None else None,
+        "target_intercept_north_m": float(eval_point["Northing"]),
+        "target_intercept_east_m": float(eval_point["Easting"]),
+        "target_intercept_found": target_crossing is not None,
+        "section_end_md_m": {"KOP": float(kop), "EOB": float(kop + abs(peak_inc)/br*30.0) if profile != "Vertical" else 0.0,
+                             "Drop start": float(drop_start) if drop_start is not None else None,
+                             "Drop end": float(drop_start + drop_len) if drop_start is not None else None,
+                             "Target intercept": float(eval_point["MD"]) if target_crossing is not None else None,
+                             "Planned TD": float(out.iloc[-1]["MD"])},
+        "note": "Practice-grade profile generation; target interception is evaluated separately from planned TD. Verify target fit, DLS, constraints and survey conventions before engineering use."
     }
     return out, result

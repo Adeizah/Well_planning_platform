@@ -91,7 +91,7 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
     if profile == 'Vertical':
         path, meta = generate_profile_candidate('Vertical', 0, 1, 0, 0,
             target_tvd_m, target_north_m, target_east_m,
-            station_interval=station_interval_m, max_md=max_md_m)
+            station_interval=station_interval_m, max_md=max_md_m, truncate_at_target=False)
         lat, vert, md, miss = _target_residual(path, target_tvd_m, target_north_m, target_east_m, target_geometry, point_tolerance_m)
         meta.update({'optimizer':'profile feasibility check','optimization_status':'NO_FEASIBLE_DIRECTIONAL_SOLUTION' if miss > 1.0 else 'FEASIBLE',
                      'objective_m':miss+abs(vert)*4+md*0.001,'target_lateral_error_m':lat,'target_miss_distance_m':miss,'target_vertical_error_m':vert,
@@ -137,7 +137,7 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
             path, meta = generate_profile_candidate(profile, kop, br, peak, azi,
                 target_tvd_m, target_north_m, target_east_m,
                 drop_rate_deg_30m=dr, final_inc_deg=fin, drop_start_md=drop_start_md,
-                station_interval=interval, max_md=max_md_m)
+                station_interval=interval, max_md=max_md_m, truncate_at_target=False)
             lat, vert, md, miss = _target_residual(path, target_tvd_m, target_north_m, target_east_m, target_geometry, point_tolerance_m)
             inc = np.asarray(path['Inc'], dtype=float)
             dls = np.asarray(path['DLS'], dtype=float)
