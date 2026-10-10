@@ -79,3 +79,19 @@
 - Stored the active geomagnetic model and its metadata in `reference_data` for consistent visualization export metadata.
 - Distinguished uncertainty availability from whether uncertainty is shown in the export, and added a visible warning when requested uncertainty ellipses cannot be generated.
 - Added regression tests for these behaviours.
+
+## Follow-up — Target optimization and offset visualization
+- Restored an explicit `Optimize Build & Hold to target` planning mode using KOP, build rate, target TVD and horizontal offsets to search hold inclination within the project maximum-inclination limit.
+- Kept other trajectory profiles available in manual-profile mode and stored the active planning mode in trajectory metadata.
+- Visualization now derives local minimum-curvature coordinates for offset wells that only contain MD/Inc/Azi survey stations, so their trajectories can appear in plan, vertical-section, 3D and wall-plot views.
+- Added regression checks for target optimization UI integration and offset coordinate derivation.
+
+## Profile-aware optimizer, offset survey workflow and theme toggle
+- Added multi-parameter optimization for the selected trajectory profile using SciPy differential evolution. Search parameters include KOP, build rate, peak inclination and azimuth; S, Build-Hold-Drop and the current Custom template additionally optimize drop start, drop rate and final inclination.
+- Target objective now uses target footprint containment for circular, elliptical, rectangular, corridor and polygon targets; point targets retain an explicit positional tolerance.
+- Optimizer reports target miss, constraints, evaluation count and feasibility; it does not silently relax constraints.
+- Added offset survey CSV template/download and import workflow with minimum-curvature coordinate generation and uncertainty metadata.
+- Visualization now displays offset surface markers even when subsurface surveys are missing and provides per-offset plotting readiness diagnostics.
+- Added optional in-app Light/Dark theme selection and matching Plotly templates.
+- Added SciPy dependency for the optimizer.
+- Limitation: Custom currently represents a configurable build-hold-drop template; arbitrary section-by-section custom control points remain future work. This remains practice/screening software, not an operationally certified trajectory design engine.
