@@ -128,3 +128,20 @@ def test_optimizer_rejects_invalid_kop_window():
             kop_mode='window', kop_window_min_m=220, kop_window_max_m=150,
             maxiter=1, popsize=4,
         )
+
+
+def test_azimuth_turn_rate_changes_azimuth_after_kop_and_respects_rate():
+    path, meta = generate_profile_candidate(
+        'J-Profile', kop_md=100.0, build_rate_deg_30m=2.0,
+        hold_inc_deg=45.0, hold_azi_deg=20.0, target_tvd=700.0,
+        target_north=0.0, target_east=500.0, station_interval=30.0,
+        max_md=1800.0, truncate_at_target=False,
+        azimuth_turn_rate_deg_30m=1.5)
+    post_kop = path[path['MD'] >= 100.0]
+    assert post_kop['Azi'].nunique() > 1
+    # Azi wraps at 360; compare unwrapped differences per 30 m MD.
+    import numpy as np
+    azi = np.unwrap(np.radians(post_kop['Azi'].to_numpy()))
+    rate = np.abs(np.degrees(np.diff(azi)) / np.diff(post_kop['MD'].to_numpy()) * 30.0)
+    assert np.max(rate, initial=0.0) <= 1.5 + 1e-6
+    assert meta['azimuth_turn_rate_deg_30m'] == 1.5
