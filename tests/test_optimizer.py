@@ -85,3 +85,46 @@ def test_target_residual_checks_lateral_hold_after_first_tvd_crossing():
     assert 250.0 <= md <= 300.0
     assert miss == 0.0
 
+
+
+def test_optimizer_can_hold_kop_fixed():
+    _, meta = optimize_trajectory(
+        profile='J-Profile', target_tvd_m=700, target_north_m=0, target_east_m=700,
+        kop_initial_m=180, build_rate_initial_deg_30m=2,
+        peak_inc_initial_deg=45, azimuth_initial_deg=90,
+        max_inclination_deg=65, max_dls_deg_30m=3,
+        max_build_rate_deg_30m=3, station_interval_m=120,
+        max_md_m=2500, kop_mode='fixed', maxiter=1, popsize=4,
+    )
+    assert abs(meta['optimized_parameters']['KOP_MD_m'] - 180) < 1e-8
+    assert meta['kop_mode'] == 'fixed'
+    assert meta['kop_constraint_m']['fixed_m'] == 180
+
+
+def test_optimizer_keeps_kop_inside_user_window():
+    _, meta = optimize_trajectory(
+        profile='J-Profile', target_tvd_m=700, target_north_m=0, target_east_m=700,
+        kop_initial_m=180, build_rate_initial_deg_30m=2,
+        peak_inc_initial_deg=45, azimuth_initial_deg=90,
+        max_inclination_deg=65, max_dls_deg_30m=3,
+        max_build_rate_deg_30m=3, station_interval_m=120,
+        max_md_m=2500, kop_mode='window', kop_window_min_m=150,
+        kop_window_max_m=220, maxiter=1, popsize=4,
+    )
+    kop = meta['optimized_parameters']['KOP_MD_m']
+    assert 150 <= kop <= 220
+    assert meta['kop_mode'] == 'window'
+
+
+def test_optimizer_rejects_invalid_kop_window():
+    import pytest
+    with pytest.raises(ValueError, match='KOP window'):
+        optimize_trajectory(
+            profile='J-Profile', target_tvd_m=700, target_north_m=0, target_east_m=700,
+            kop_initial_m=180, build_rate_initial_deg_30m=2,
+            peak_inc_initial_deg=45, azimuth_initial_deg=90,
+            max_inclination_deg=65, max_dls_deg_30m=3,
+            max_build_rate_deg_30m=3, max_md_m=2500,
+            kop_mode='window', kop_window_min_m=220, kop_window_max_m=150,
+            maxiter=1, popsize=4,
+        )
