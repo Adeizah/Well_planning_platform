@@ -64,3 +64,23 @@ def test_custom_optimizer_exposes_drop_start_and_drop_rate():
     params=meta['optimized_parameters']
     assert params['drop_start_md_m'] is not None
     assert params['drop_rate_deg_30m'] is not None
+
+
+def test_target_residual_checks_lateral_hold_after_first_tvd_crossing():
+    """A horizontal section can hit the target after the first TVD crossing."""
+    from core.optimizer import _target_residual
+    path = pd.DataFrame({
+        'MD': [0.0, 100.0, 200.0, 300.0],
+        'TVD': [0.0, 100.0, 200.0, 200.2],
+        'Northing': [0.0, 50.0, 100.0, 300.0],
+        'Easting': [0.0, 0.0, 0.0, 0.0],
+    })
+    lateral, vertical, md, miss = _target_residual(
+        path, target_tvd_m=200.0, target_north_m=250.0, target_east_m=0.0,
+        target_geometry={'type': 'Circular', 'north_m': 250.0, 'east_m': 0.0, 'radius_m': 10.0},
+        point_tolerance_m=30.48,
+    )
+    assert lateral <= 1.0
+    assert abs(vertical) <= 1.0
+    assert 250.0 <= md <= 300.0
+    assert miss == 0.0
