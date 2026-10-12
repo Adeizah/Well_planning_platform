@@ -14,35 +14,57 @@ DROPPING = {'S-Profile', 'Build-Hold-Drop', 'Custom'}
 
 
 def _target_residual(path, target_tvd_m, target_north_m, target_east_m, target_geometry=None, point_tolerance_m=30.48):
-    """Interpolate the path at target TVD to avoid station-interval bias."""
+    """Find the best target-plane/footprint approach anywhere along the path.
+
+    Do not stop at the *first* TVD crossing: a horizontal section can remain at
+    target TVD while continuing laterally, and that later station may be the
+    actual target hit. Candidate points include target-TVD segment crossings,
+    horizontal projections of the target centre onto every segment, and stations.
+    Vertical error is retained as a separate feasibility condition.
+    """
     tvd = np.asarray(path['TVD'], dtype=float)
     north = np.asarray(path['Northing'], dtype=float)
     east = np.asarray(path['Easting'], dtype=float)
+    md_values = np.asarray(path['MD'], dtype=float)
     if len(tvd) == 0:
         return 1e9, 1e9, 1e9, 1e9
-    # Candidate generator may stop at the first TVD crossing.
-    ix = np.flatnonzero(tvd >= target_tvd_m)
-    if len(ix):
-        j = int(ix[0])
-        if j == 0:
-            n, e, md = north[0], east[0], float(path.iloc[0]['MD'])
-        else:
-            t0, t1 = tvd[j-1], tvd[j]
-            f = 0.0 if abs(t1-t0) < 1e-12 else (target_tvd_m-t0)/(t1-t0)
-            f = min(1.0, max(0.0, f))
-            n = north[j-1] + f*(north[j]-north[j-1])
-            e = east[j-1] + f*(east[j]-east[j-1])
-            md0, md1 = float(path.iloc[j-1]['MD']), float(path.iloc[j]['MD'])
-            md = md0 + f*(md1-md0)
-        lat = math.hypot(n-target_north_m, e-target_east_m)
-        miss = _shape_miss(n, e, lat, target_geometry, point_tolerance_m)
-        return lat, 0.0, md, miss
-    end = path.iloc[-1]
-    vert = float(target_tvd_m - end['TVD'])
-    lat = math.hypot(float(end['Northing'])-target_north_m,
-                     float(end['Easting'])-target_east_m)
-    miss = _shape_miss(float(end['Northing']), float(end['Easting']), lat, target_geometry, point_tolerance_m)
-    return lat, vert, float(end['MD']), miss
+
+    candidates = []
+    def add_candidate(n, e, v, md):
+        lat = math.hypot(float(n) - target_north_m, float(e) - target_east_m)
+        miss = _shape_miss(float(n), float(e), lat, target_geometry, point_tolerance_m)
+        # Target-plane adherence is a hard design requirement; the miss term
+        # measures distance outside the permitted footprint.
+        score = miss + 4.0 * abs(float(v) - target_tvd_m)
+        candidates.append((score, lat, float(v) - target_tvd_m, float(md), miss))
+
+    for i in range(len(tvd)):
+        add_candidate(north[i], east[i], tvd[i], md_values[i])
+
+    for i in range(len(tvd) - 1):
+        n0, n1 = north[i], north[i + 1]
+        e0, e1 = east[i], east[i + 1]
+        v0, v1 = tvd[i], tvd[i + 1]
+        m0, m1 = md_values[i], md_values[i + 1]
+        dn, de = n1 - n0, e1 - e0
+        denom = dn * dn + de * de
+        # Point on this segment closest to the target in horizontal projection.
+        fxy = 0.0 if denom < 1e-15 else max(0.0, min(1.0,
+            ((target_north_m - n0) * dn + (target_east_m - e0) * de) / denom))
+        add_candidate(n0 + fxy * dn, e0 + fxy * de,
+                      v0 + fxy * (v1 - v0), m0 + fxy * (m1 - m0))
+        # Exact TVD crossing, when the segment crosses the target plane.
+        if (v0 - target_tvd_m) * (v1 - target_tvd_m) <= 0 and abs(v1 - v0) > 1e-12:
+            fz = max(0.0, min(1.0, (target_tvd_m - v0) / (v1 - v0)))
+            add_candidate(n0 + fz * dn, e0 + fz * de, target_tvd_m,
+                          m0 + fz * (m1 - m0))
+        # If a segment is essentially horizontal and lies close to target TVD,
+        # its lateral projection is already evaluated above. This is the key case
+        # that first-crossing-only logic missed.
+
+    best = min(candidates, key=lambda item: item[0])
+    _, lat, vert, md, miss = best
+    return float(lat), float(vert), float(md), float(miss)
 
 
 def _shape_miss(north, east, center_distance, target_geometry=None, point_tolerance_m=30.48):
@@ -168,10 +190,14 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
             if profile in DROPPING and drop_start_md is not None:
                 drop_end_md = float(drop_start_md) + drop_len
                 section_order_penalty = max(0.0, drop_end_md - float(md)) * 3.0
-            score = (miss + 4.0*abs(vert) + 500.0*inc_pen + 150.0*dls_pen
+            # Treat physical limits as hard constraints for search purposes. A candidate that
+            # hits the target by violating inclination/DLS must not beat a feasible
+            # candidate merely because its geometric miss is smaller.
+            score = (miss + 4.0*abs(vert) + 100000.0*inc_pen + 100000.0*dls_pen
                      + section_order_penalty + 0.001*md)
             if detailed:
                 meta.update({'target_lateral_error_m':lat,'target_miss_distance_m':miss,'target_vertical_error_m':vert,
+                    'target_intercept_md_m':md,
                     'objective_m':score,'section_order_penalty_m':section_order_penalty,'max_inclination_deg':float(np.max(inc, initial=0)),
                     'max_dls_deg_30m':float(np.max(dls, initial=0)),
                     'optimized_parameters':{'profile':profile,'KOP_MD_m':kop,'build_rate_deg_30m':br,
