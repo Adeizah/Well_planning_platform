@@ -122,3 +122,12 @@
 - Optimization metadata now records the KOP mode and applied constraint.
 - Added regression tests for fixed KOP, KOP-window enforcement, and invalid-window rejection.
 - Validation: 50 tests passed; Python compilation passed. Streamlit interactive browser testing was not performed.
+
+## Diagnostic and azimuth-turn update (2026-10-12)
+- Added optional signed continuous azimuth turning beginning at KOP to the trajectory generator; minimum-curvature dogleg severity includes combined inclination and azimuth changes.
+- Added azimuth turn-rate as an optimizer variable bounded by the configured maximum turn rate; independent post-search diagnostics report actual turn rate and violations.
+- Added a manual-mode azimuth-turn-rate control (zero retains constant azimuth) and shared checks for target fit, maximum inclination, DLS and turn rate.
+- Clarified target approach terminology: the reported best-approach station / target-TVD crossing is not by itself proof of a target hit. Target feasibility still requires lateral footprint and vertical tolerance.
+- Increased optimization effort for ordinary searches (requested maxiter >= 5) by 50% to improve target-fit reliability while retaining short budgets for quick smoke tests.
+- Added regression coverage for continuous azimuth turning and its configured rate limit.
+- Scope note: this remains practice-grade piecewise trajectory software; changing azimuth is represented as a continuous constant-rate turn beginning at KOP, not a complete vendor-style 3D steering/BHA dynamics model.

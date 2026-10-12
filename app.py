@@ -10,7 +10,7 @@ import streamlit as st
 
 from core.project import new_project, project_to_json, project_from_json, validate_project
 from core.trajectory import minimum_curvature, build_constant_build_hold, solve_build_hold_hold_inclination, generate_profile_candidate
-from core.optimizer import optimize_trajectory
+from core.optimizer import optimize_trajectory, _target_residual
 from core.geometry import target_boundary
 from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to_magnetic, magnetic_to_grid, grid_to_magnetic, reference_requirements, convert_to_project_reference
 from models.geomagnetic import wmm2025, igrf14
@@ -398,7 +398,7 @@ elif page=='Trajectory Planner':
         kop_window_max_ft = kb.number_input('Maximum permitted KOP MD (ft)', 0.0, 49213.0, min(49213.0, kop_ft+100.0), key='kop_window_max_ft', help='The optimizer cannot move KOP outside this interval.')
         if kop_window_min_ft > kop_window_max_ft:
             st.error('Minimum KOP must not exceed maximum KOP.')
-    a,b=st.columns(2); dr_ft=a.number_input('Drop rate (°/100 ft)',.1,15.,3.0,help='Used by S-Profile and Build-Hold-Drop.'); final_inc=b.number_input('Final inclination after drop (°)',0.,max(1.0,max_inc),0.0,help='Used by S-Profile and Build-Hold-Drop.')
+    a,b,c=st.columns(3); dr_ft=a.number_input('Drop rate (°/100 ft)',.1,15.,3.0,help='Used by S-Profile and Build-Hold-Drop.'); final_inc=b.number_input('Final inclination after drop (°)',0.,max(1.0,max_inc),0.0,help='Used by S-Profile and Build-Hold-Drop.'); turn_ft=c.number_input('Azimuth turn rate (°/100 ft)',-15.0,15.0,0.0,help='Signed continuous azimuth change beginning at KOP. Zero keeps constant azimuth. Optimized mode searches within the project turn-rate limit.')
     a,b,c=st.columns(3); a.number_input('Target TVD (ft)',0.,49213.,target_tvd*M_TO_FT,disabled=True); b.number_input('Target Northing offset (ft)',-3280840.,3280840.,rel_n*M_TO_FT,disabled=True); c.number_input('Target Easting offset (ft)',-3280840.,3280840.,rel_e*M_TO_FT,disabled=True)
     st.caption(f'Maximum inclination constraint: **{max_inc:.1f}°** • Target azimuth from project-grid geometry: **{default_az:.2f}° Grid**')
     kop=kop_ft*FT_TO_M; br=dls_100ft_to_30m(br_ft); td=target_tvd; n=rel_n; e=rel_e
@@ -440,7 +440,13 @@ elif page=='Trajectory Planner':
                 )
                 meta=dict(meta); meta['planning_mode']=planning_mode
             else:
-                out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,max_md=provisional_md_limit,truncate_at_target=False)
+                out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,max_md=provisional_md_limit,truncate_at_target=False,azimuth_turn_rate_deg_30m=dls_100ft_to_30m(turn_ft))
+                max_turn=float(project.get('design_constraints',{}).get('max_turn_rate_deg_30m',3.0) or 3.0)
+                meta['max_turn_rate_actual_deg_30m']=abs(dls_100ft_to_30m(turn_ft))
+                meta['constraint_violations']=[name for name,failed in [('maximum_turn_rate',abs(meta['max_turn_rate_actual_deg_30m'])>max_turn+1e-6),('maximum_DLS',float(out['DLS'].max())>float(project.get('design_constraints',{}).get('max_dls_deg_30m',3.0))+1e-6),('maximum_inclination',float(out['Inc'].max())>max_inc+1e-6)] if failed]
+                if meta['constraint_violations'] or not meta.get('target_hit',False):
+                    meta['status']='REVIEW'
+                meta['optimization_status']='FEASIBLE' if meta['status']=='PASS' else 'REVIEW'
                 meta=dict(meta); meta['planning_mode']='Manual profile'
             # Preserve a dedicated planned candidate as well as the legacy active survey.
             # Survey Manager may later replace project['surveys'] with imported/measured data;
@@ -470,7 +476,7 @@ elif page=='Trajectory Planner':
         if meta.get('status')=='PASS': st.success(result_line)
         else: st.warning(result_line + ' • Target/profile feasibility needs review.')
         if meta.get('target_intercept_md_m') is not None:
-            st.caption(f"Target TVD crossing: {float(meta['target_intercept_md_m'])*M_TO_FT:,.1f} ft MD • target miss beyond tolerance: {float(meta.get('target_miss_distance_m',max(0.0,float(meta.get('lateral_error_m',0))-30.48)))*M_TO_FT:,.1f} ft")
+            st.caption(f"Best target approach: {float(meta['target_intercept_md_m'])*M_TO_FT:,.1f} ft MD • target miss beyond tolerance: {float(meta.get('target_miss_distance_m',max(0.0,float(meta.get('lateral_error_m',0))-30.48)))*M_TO_FT:,.1f} ft")
         if saved_mode=='Optimize selected profile to target':
             st.metric('Optimization outcome',meta.get('optimization_status','REVIEW'))
             st.caption(f"Objective score: {float(meta.get('objective_m',float('nan'))):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {float(meta.get('max_dls_deg_30m',float('nan'))):.2f}°/30 m")
@@ -492,7 +498,7 @@ elif page=='Trajectory Planner':
             target_md=meta.get('target_intercept_md_m')
             if target_md is not None:
                 marker_idx=int((display_source['MD']-float(target_md)).abs().idxmin())
-                selected_indices.add(marker_idx); marker_names.setdefault(marker_idx,[]).append('Target intercept (nearest station)')
+                selected_indices.add(marker_idx); marker_names.setdefault(marker_idx,[]).append('Best target approach (nearest station)')
             selected_sorted=sorted(selected_indices); display_source=display_source.iloc[selected_sorted].copy()
             labels=[]
             for original_idx in selected_sorted:
