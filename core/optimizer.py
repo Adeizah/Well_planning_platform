@@ -35,7 +35,14 @@ def _target_residual(path, target_tvd_m, target_north_m, target_east_m, target_g
         miss = _shape_miss(float(n), float(e), lat, target_geometry, point_tolerance_m)
         # Target-plane adherence is a hard design requirement; the miss term
         # measures distance outside the permitted footprint.
-        score = miss + 4.0 * abs(float(v) - target_tvd_m)
+        # Once inside a target footprint, distance-to-boundary is zero everywhere.
+        # Retain a small centre-distance tie-breaker so optimization does not
+        # treat an edge hit as equally desirable as a centre hit.
+        vertical_error = abs(float(v) - target_tvd_m)
+        # A point outside the allowed target-depth band must not outrank an
+        # actual target-plane crossing merely because its horizontal position is closer.
+        vertical_penalty = 4.0 * vertical_error + 100.0 * max(0.0, vertical_error - point_tolerance_m)
+        score = miss + 0.35 * lat + vertical_penalty
         candidates.append((score, lat, float(v) - target_tvd_m, float(md), miss))
 
     for i in range(len(tvd)):
@@ -97,7 +104,7 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
                         drop_rate_initial_deg_30m=3.0, final_inc_initial_deg=0.0,
                         target_geometry=None, point_tolerance_m=30.48,
                         station_interval_m=60.0, max_md_m=15000.0,
-                        maxiter=18, popsize=7, seed=17):
+                        maxiter=22, popsize=8, seed=17):
     """Optimize KOP, build rate, peak inclination and azimuth; for S profiles,
     also optimize drop rate and final inclination. Objective balances target miss,
     DLS/inclination feasibility, and excessive MD. All distances are metres.
@@ -146,10 +153,13 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
         if peak_hi < peak_lo:
             raise ValueError('ERD profile is incompatible with the maximum-inclination constraint.')
     max_br = min(float(max_build_rate_deg_30m), float(max_dls_deg_30m))
+    # Optimize azimuth as a signed deviation from the direct wellhead-to-target
+    # bearing. This avoids placing a due-north target at the 0/360 search boundary.
+    target_azimuth = math.degrees(math.atan2(float(target_east_m), float(target_north_m))) % 360.0
     if max_br <= 0:
         raise ValueError('Maximum build rate must be positive.')
     kop_hi = min(max(100.0, target_tvd_m*0.85), max_md_m*0.6)
-    bounds = [(0.0, kop_hi), (0.25, max_br), (peak_lo, peak_hi), (0.0, 360.0)]
+    bounds = [(0.0, kop_hi), (0.25, max_br), (peak_lo, peak_hi), (-180.0, 180.0)]
     if profile in DROPPING:
         bounds.extend([(0.25, min(float(max_dls_deg_30m), float(max_build_rate_deg_30m))), (0.0, peak_hi), (0.2, 0.95)])
     elif profile == 'Custom':
@@ -159,7 +169,8 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
         pass
 
     def unpack(x):
-        kop, br, peak, azi = x[:4]
+        kop, br, peak, azimuth_delta = x[:4]
+        azi = (target_azimuth + float(azimuth_delta)) % 360.0
         dr = x[4] if profile in DROPPING else float(drop_rate_initial_deg_30m)
         # A genuine S / build-hold-drop needs a meaningful inclination reduction.
         fin = min(float(x[5]), max(0.0, peak - 5.0)) if profile in DROPPING else float(final_inc_initial_deg)
@@ -218,7 +229,7 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
                                     x0=[min(max(float(kop_initial_m), bounds[0][0]), bounds[0][1]),
                                         min(max(float(build_rate_initial_deg_30m), bounds[1][0]), bounds[1][1]),
                                         min(max(float(peak_inc_initial_deg), bounds[2][0]), bounds[2][1]),
-                                        float(azimuth_initial_deg)%360.0] + ([min(max(float(drop_rate_initial_deg_30m), bounds[4][0]), bounds[4][1]),
+                                        ((float(azimuth_initial_deg) - target_azimuth + 180.0) % 360.0) - 180.0] + ([min(max(float(drop_rate_initial_deg_30m), bounds[4][0]), bounds[4][1]),
                                         min(max(float(final_inc_initial_deg), bounds[5][0]), bounds[5][1]), 0.70] if profile in DROPPING else []))
     # Rebuild at finer station interval and report final feasibility honestly.
     best_x = result.x
