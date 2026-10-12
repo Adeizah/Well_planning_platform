@@ -84,3 +84,4 @@ def test_target_residual_checks_lateral_hold_after_first_tvd_crossing():
     assert abs(vertical) <= 1.0
     assert 250.0 <= md <= 300.0
     assert miss == 0.0
+
