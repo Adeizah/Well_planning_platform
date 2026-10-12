@@ -104,12 +104,16 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
                         drop_rate_initial_deg_30m=3.0, final_inc_initial_deg=0.0,
                         target_geometry=None, point_tolerance_m=30.48,
                         station_interval_m=60.0, max_md_m=15000.0,
+                        kop_mode="free", kop_window_min_m=None, kop_window_max_m=None,
                         maxiter=22, popsize=8, seed=17):
     """Optimize KOP, build rate, peak inclination and azimuth; for S profiles,
     also optimize drop rate and final inclination. Objective balances target miss,
     DLS/inclination feasibility, and excessive MD. All distances are metres.
     """
     profile = str(profile)
+    kop_mode = str(kop_mode).lower().replace(" ", "_").replace("-", "_")
+    if kop_mode not in {"free", "fixed", "window"}:
+        raise ValueError("KOP mode must be free, fixed, or window.")
     supported = {'Vertical','J-Profile','S-Profile','Build & Hold','Build-Hold-Drop','Horizontal','ERD','Custom'}
     if profile not in supported:
         raise ValueError(f'Unsupported profile for optimization: {profile}')
@@ -159,7 +163,19 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
     if max_br <= 0:
         raise ValueError('Maximum build rate must be positive.')
     kop_hi = min(max(100.0, target_tvd_m*0.85), max_md_m*0.6)
-    bounds = [(0.0, kop_hi), (0.25, max_br), (peak_lo, peak_hi), (-180.0, 180.0)]
+    if kop_mode == "fixed":
+        kop_lo = kop_upper = float(kop_initial_m)
+        if kop_lo < 0 or kop_lo > max_md_m:
+            raise ValueError("Fixed KOP must be between 0 and the maximum planned MD.")
+    elif kop_mode == "window":
+        if kop_window_min_m is None or kop_window_max_m is None:
+            raise ValueError("Provide both minimum and maximum KOP for KOP-window optimization.")
+        kop_lo, kop_upper = float(kop_window_min_m), float(kop_window_max_m)
+        if kop_lo < 0 or kop_upper < kop_lo or kop_upper > max_md_m:
+            raise ValueError("KOP window must satisfy 0 ≤ minimum ≤ maximum ≤ maximum planned MD.")
+    else:
+        kop_lo, kop_upper = 0.0, kop_hi
+    bounds = [(kop_lo, kop_upper), (0.25, max_br), (peak_lo, peak_hi), (-180.0, 180.0)]
     if profile in DROPPING:
         bounds.extend([(0.25, min(float(max_dls_deg_30m), float(max_build_rate_deg_30m))), (0.0, peak_hi), (0.2, 0.95)])
     elif profile == 'Custom':
@@ -235,6 +251,10 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
     best_x = result.x
     fine_interval = min(15.0, max(5.0, float(station_interval_m)/4.0))
     path, meta = evaluate(best_x, detailed=True, interval=fine_interval)
+    meta['kop_mode'] = kop_mode
+    meta['kop_constraint_m'] = ({'fixed_m': float(kop_initial_m)} if kop_mode == 'fixed' else
+                                {'minimum_m': float(kop_lo), 'maximum_m': float(kop_upper)} if kop_mode == 'window' else
+                                {'minimum_m': 0.0, 'maximum_m': float(kop_hi)})
     meta['optimizer_success'] = bool(result.success)
     meta['optimizer_message'] = str(result.message)
     meta['optimizer_iterations'] = int(getattr(result, 'nit', 0))
