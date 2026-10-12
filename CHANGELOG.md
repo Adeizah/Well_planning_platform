@@ -95,3 +95,9 @@
 - Added optional in-app Light/Dark theme selection and matching Plotly templates.
 - Added SciPy dependency for the optimizer.
 - Limitation: Custom currently represents a configurable build-hold-drop template; arbitrary section-by-section custom control points remain future work. This remains practice/screening software, not an operationally certified trajectory design engine.
+
+## Trajectory planner persistence follow-up (2026-10-12)
+- Persisted the latest generated candidate separately as `planned_surveys` and `planned_trajectory_metadata`, while retaining the legacy active `surveys` collection for downstream compatibility.
+- Trajectory Planner now restores and displays the saved candidate on page revisit rather than rendering results only during the generation-button rerun.
+- Full/compact survey display is a view-only control with a stable Streamlit key; it does not run the optimizer or replace the candidate.
+- Survey Manager may replace the active survey collection without destroying the separately saved planned candidate.

@@ -423,45 +423,72 @@ elif page=='Trajectory Planner':
             else:
                 out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,max_md=provisional_md_limit,truncate_at_target=False)
                 meta=dict(meta); meta['planning_mode']='Manual profile'
-            project['surveys']=out.to_dict('records'); project['well_design']=profile; project['trajectory_metadata']={'planner':'Profile-aware multi-parameter optimizer' if planning_mode=='Optimize selected profile to target' else 'Piecewise profile candidate','planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z'}; save()
-            result_line=f"Profile: {profile} • status {meta['status']} • lateral error {meta['lateral_error_m']*M_TO_FT:.1f} ft • TVD error {meta['tvd_error_m']*M_TO_FT:.1f} ft • final inclination {meta['final_inclination_deg']:.2f}°"
-            if meta['status']=='PASS': st.success(result_line)
-            else: st.warning(result_line + ' • Target/profile feasibility needs review.')
-            if meta.get('target_intercept_md_m') is not None:
-                st.caption(f"Target TVD crossing: {meta['target_intercept_md_m']*M_TO_FT:,.1f} ft MD • target miss beyond tolerance: {meta.get('target_miss_distance_m', max(0.0,meta['lateral_error_m']-30.48))*M_TO_FT:,.1f} ft")
-            elif planning_mode=='Manual profile':
-                st.caption('The generated path did not cross the target TVD within the available trajectory depth.')
-            if planning_mode=='Optimize selected profile to target':
-                st.metric('Optimization outcome', meta.get('optimization_status','REVIEW'))
-                st.caption(f"Objective score: {meta.get('objective_m', float('nan')):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {meta.get('max_dls_deg_30m', float('nan')):.2f}°/30 m")
-                if meta.get('optimization_status') != 'FEASIBLE': st.warning('No candidate met all current target and trajectory constraints. The best candidate is shown for review; constraints have not been relaxed.')
-            b1,b2,b3,b4=st.columns(4); b1.metric('Build end / EOB',f"{meta['build_end_md_m']*M_TO_FT:,.0f} ft"); b2.metric('Build length',f"{meta['build_length_m']*M_TO_FT:,.0f} ft"); b3.metric('Final MD',f"{meta['final_md_m']*M_TO_FT:,.0f} ft"); b4.metric('Final inclination',f"{meta['final_inclination_deg']:.1f}°")
-            detail=st.radio('Survey table detail',['Section endpoints (compact)','Full survey stations'],horizontal=True,index=0,help='The complete calculated survey is still saved to the project and used by downstream modules. This setting only changes the table shown here.')
-            display_source=out.copy()
-            if detail=='Section endpoints (compact)':
-                section_ends=meta.get('section_end_md_m',{})
-                selected_indices={0,len(display_source)-1}
-                marker_names={}
-                for section_name, section_md in section_ends.items():
-                    if section_md is not None and len(display_source):
-                        marker_idx=int((display_source['MD']-float(section_md)).abs().idxmin())
-                        selected_indices.add(marker_idx)
-                        marker_names.setdefault(marker_idx, []).append(section_name)
-                target_md=meta.get('target_intercept_md_m')
-                if target_md is not None and len(display_source):
-                    marker_idx=int((display_source['MD']-float(target_md)).abs().idxmin())
-                    selected_indices.add(marker_idx)
-                    marker_names.setdefault(marker_idx, []).append('Target intercept (nearest station)')
-                selected_sorted=sorted(selected_indices)
-                display_source=display_source.iloc[selected_sorted].copy()
-                labels=[]
-                for original_idx, rr in zip(selected_sorted, display_source.itertuples()):
-                    names_here=marker_names.get(original_idx, [])
-                    if original_idx==0: names_here=['Start']+names_here
-                    labels.append(' / '.join(dict.fromkeys(names_here)) if names_here else 'Station')
-                display_source.insert(0,'Section / marker',labels)
-            out_display=display_source.copy(); [out_display.__setitem__(cc,out_display[cc]*M_TO_FT) for cc in ['MD','TVD','Northing','Easting','VS'] if cc in out_display.columns]; out_display['TVDSS']=(float(project.get('kb_m',0))-display_source['TVD'])*M_TO_FT; out_display['DLS']=out_display['DLS'].map(lambda x:dls_for_interval_to_100ft(x,30.0)); st.dataframe(out_display,use_container_width=True,hide_index=True)
-        except Exception as ex: st.error(str(ex))
+            # Preserve a dedicated planned candidate as well as the legacy active survey.
+            # Survey Manager may later replace project['surveys'] with imported/measured data;
+            # returning here must still restore the saved planner candidate.
+            records=out.to_dict('records')
+            project['planned_surveys']=records
+            project['surveys']=records
+            project['well_design']=profile
+            project['trajectory_metadata']={'planner':'Profile-aware multi-parameter optimizer' if planning_mode=='Optimize selected profile to target' else 'Piecewise profile candidate','planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z','survey_source':'planned'}
+            project['planned_trajectory_metadata']=dict(project['trajectory_metadata'])
+            save()
+            st.success('Trajectory candidate saved. You can leave this page and return without recalculating it.')
+        except Exception as ex:
+            st.error(str(ex))
+
+    # Render the saved candidate on every visit, not only during the button-click rerun.
+    # This keeps results visible after navigation and makes display controls independent of calculation.
+    saved_meta_bundle=project.get('planned_trajectory_metadata') or (project.get('trajectory_metadata') if project.get('trajectory_metadata',{}).get('survey_source')=='planned' else None)
+    saved_records=project.get('planned_surveys') or (project.get('surveys',[]) if saved_meta_bundle else [])
+    if saved_meta_bundle and saved_records:
+        meta=saved_meta_bundle.get('planner_result',{})
+        saved_profile=saved_meta_bundle.get('profile',meta.get('profile',profile))
+        saved_mode=saved_meta_bundle.get('planning_mode',meta.get('planning_mode','Unknown'))
+        st.markdown('### Saved trajectory candidate')
+        st.caption(f"Saved profile: **{saved_profile}** • Mode: **{saved_mode}** • Calculated: {saved_meta_bundle.get('calculated_utc','time not recorded')} • This is the saved result; changing controls above does not recalculate it.")
+        result_line=f"Profile: {saved_profile} • status {meta.get('status','REVIEW')} • lateral error {float(meta.get('lateral_error_m',meta.get('target_lateral_error_m',float('nan'))))*M_TO_FT:.1f} ft • TVD error {float(meta.get('tvd_error_m',meta.get('target_vertical_error_m',float('nan'))))*M_TO_FT:.1f} ft • final inclination {float(meta.get('final_inclination_deg',0.0)):.2f}°"
+        if meta.get('status')=='PASS': st.success(result_line)
+        else: st.warning(result_line + ' • Target/profile feasibility needs review.')
+        if meta.get('target_intercept_md_m') is not None:
+            st.caption(f"Target TVD crossing: {float(meta['target_intercept_md_m'])*M_TO_FT:,.1f} ft MD • target miss beyond tolerance: {float(meta.get('target_miss_distance_m',max(0.0,float(meta.get('lateral_error_m',0))-30.48)))*M_TO_FT:,.1f} ft")
+        if saved_mode=='Optimize selected profile to target':
+            st.metric('Optimization outcome',meta.get('optimization_status','REVIEW'))
+            st.caption(f"Objective score: {float(meta.get('objective_m',float('nan'))):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {float(meta.get('max_dls_deg_30m',float('nan'))):.2f}°/30 m")
+            if meta.get('optimization_status')!='FEASIBLE': st.warning('No candidate met all current target and trajectory constraints. The best candidate is shown for review; constraints have not been relaxed.')
+        m1,m2,m3,m4=st.columns(4)
+        m1.metric('Build end / EOB',f"{float(meta.get('build_end_md_m',0))*M_TO_FT:,.0f} ft")
+        m2.metric('Build length',f"{float(meta.get('build_length_m',0))*M_TO_FT:,.0f} ft")
+        m3.metric('Final MD',f"{float(meta.get('final_md_m',float(pd.DataFrame(saved_records).iloc[-1].get('MD',0))))*M_TO_FT:,.0f} ft")
+        m4.metric('Final inclination',f"{float(meta.get('final_inclination_deg',pd.DataFrame(saved_records).iloc[-1].get('Inc',0))):.1f}°")
+        detail=st.radio('Survey table detail',['Section endpoints (compact)','Full survey stations'],horizontal=True,index=0,key='planner_survey_detail',help='This only changes the displayed rows. The saved candidate is retained when navigating between pages.')
+        display_source=pd.DataFrame(saved_records).copy().reset_index(drop=True)
+        if detail=='Section endpoints (compact)' and not display_source.empty:
+            section_ends=meta.get('section_end_md_m',{})
+            selected_indices={0,len(display_source)-1}; marker_names={}
+            for section_name, section_md in section_ends.items():
+                if section_md is not None:
+                    marker_idx=int((display_source['MD']-float(section_md)).abs().idxmin())
+                    selected_indices.add(marker_idx); marker_names.setdefault(marker_idx,[]).append(section_name)
+            target_md=meta.get('target_intercept_md_m')
+            if target_md is not None:
+                marker_idx=int((display_source['MD']-float(target_md)).abs().idxmin())
+                selected_indices.add(marker_idx); marker_names.setdefault(marker_idx,[]).append('Target intercept (nearest station)')
+            selected_sorted=sorted(selected_indices); display_source=display_source.iloc[selected_sorted].copy()
+            labels=[]
+            for original_idx in selected_sorted:
+                names_here=marker_names.get(original_idx,[])
+                if original_idx==0: names_here=['Start']+names_here
+                labels.append(' / '.join(dict.fromkeys(names_here)) if names_here else 'Station')
+            display_source.insert(0,'Section / marker',labels)
+        out_display=display_source.copy()
+        for cc in ['MD','TVD','Northing','Easting','VS']:
+            if cc in out_display.columns: out_display[cc]=out_display[cc]*M_TO_FT
+        if 'TVD' in display_source.columns: out_display['TVDSS']=(float(project.get('kb_m',0))-display_source['TVD'])*M_TO_FT
+        if 'DLS' in out_display.columns: out_display['DLS']=out_display['DLS'].map(lambda x:dls_for_interval_to_100ft(x,30.0))
+        st.dataframe(out_display,use_container_width=True,hide_index=True)
+    elif project.get('surveys'):
+        st.info('No saved trajectory-planner candidate is available yet. The Survey Manager may contain an imported or measured survey; generate a candidate here to create a persistent planned result.')
 
 # Targets
 elif page=='Targets':
