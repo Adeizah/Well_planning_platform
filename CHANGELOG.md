@@ -131,3 +131,18 @@
 - Increased optimization effort for ordinary searches (requested maxiter >= 5) by 50% to improve target-fit reliability while retaining short budgets for quick smoke tests.
 - Added regression coverage for continuous azimuth turning and its configured rate limit.
 - Scope note: this remains practice-grade piecewise trajectory software; changing azimuth is represented as a continuous constant-rate turn beginning at KOP, not a complete vendor-style 3D steering/BHA dynamics model.
+
+## MD/TD target-intercept correction
+- Added exact trajectory trimming at a validated target-intercept MD, including an interpolated final survey station.
+- Optimized candidates are trimmed only when the target footprint/depth, required profile section, inclination, DLS, and azimuth-turn checks pass. Failed candidates retain the full search path for diagnosis and remain REVIEW.
+- Manual candidates are likewise trimmed only after all current feasibility checks pass.
+- Target crossings during build are no longer valid interceptions for profiles whose selected geometry requires completion of the build first; drop profiles require completion of the drop section.
+- Added regression tests for final-MD truncation and rejection of a Horizontal target crossing during build.
+
+## 2026-10-12 — Target-driven TD and ordered multiple-target planning
+- Target-driven trajectory planning no longer treats the Well Architecture planned TD as an implicit hard ceiling. The default uses an internal search ceiling while calculating final TD from the valid final-target interception; users can explicitly enable a maximum-MD constraint.
+- Added an ordered multiple-target selection workflow to Trajectory Planner. The final selected target defines the target-terminated TD, and the optimizer scores every required target against its depth/footprint and enforces increasing interception MD order.
+- Added per-target interception results (MD, lateral/vertical error, footprint miss, order and tolerance flags) to optimizer metadata and the saved-result UI.
+- Multiple-target planning requires an optimization mode; Manual profile mode explicitly refuses to imply that a single-target manual candidate satisfies a sequence.
+- Added regression tests for malformed sequence inputs and vertical-well target sequences.
+- Validation performed: Python compilation passed; project/pressure tests passed (2); multi-target tests passed (2). Broader trajectory/optimizer tests exceeded the execution time limit when run together, so full end-to-end validation remains outstanding.

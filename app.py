@@ -9,7 +9,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from core.project import new_project, project_to_json, project_from_json, validate_project
-from core.trajectory import minimum_curvature, build_constant_build_hold, solve_build_hold_hold_inclination, generate_profile_candidate
+from core.trajectory import minimum_curvature, build_constant_build_hold, solve_build_hold_hold_inclination, generate_profile_candidate, truncate_trajectory_at_md
 from core.optimizer import optimize_trajectory, _target_residual
 from core.geometry import target_boundary
 from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to_magnetic, magnetic_to_grid, grid_to_magnetic, reference_requirements, convert_to_project_reference
@@ -372,8 +372,24 @@ elif page=='Trajectory Planner':
     targets=project.get('targets',[])
     valid_targets=[t for t in targets if t.get('name')]
     if not valid_targets: st.warning('Define a valid target first on the Targets page.'); st.stop()
-    names=[t.get('name','Target') for t in valid_targets]; idx=st.selectbox('Target',range(len(names)),format_func=lambda i:names[i]); t=valid_targets[idx]
+    names=[t.get('name','Target') for t in valid_targets]
+    multi_target=st.checkbox('Plan through multiple targets', value=False, help='Select required targets in interception order. The final selected target determines the default planned TD.')
+    if multi_target:
+        selected_indices=st.multiselect('Required targets — select in interception order', list(range(len(names))), default=[0], format_func=lambda i:names[i], key='planner_target_sequence')
+        if not selected_indices:
+            st.warning('Select at least one required target.'); st.stop()
+        if len(set(selected_indices)) != len(selected_indices):
+            st.error('Each target can appear only once in the required sequence.'); st.stop()
+        idx=selected_indices[-1]
+    else:
+        idx=st.selectbox('Target',range(len(names)),format_func=lambda i:names[i])
+        selected_indices=[idx]
+    t=valid_targets[idx]
     surface_n=float(project.get('surface_northing_m',0)); surface_e=float(project.get('surface_easting_m',0))
+    target_sequence=[]
+    for target_idx in selected_indices:
+        item=valid_targets[target_idx]
+        target_sequence.append({'name':item.get('name','Target'), 'tvd_m':float(project.get('kb_m',0))-float(item.get('tvdss_m',0)), 'north_m':float(item.get('north_m',0))-surface_n, 'east_m':float(item.get('east_m',0))-surface_e, 'geometry':{**dict(item), 'north_m':float(item.get('north_m',0))-surface_n, 'east_m':float(item.get('east_m',0))-surface_e}, 'tolerance_m':30.48})
     target_n=float(t.get('north_m',0)); target_e=float(t.get('east_m',0)); rel_n=target_n-surface_n; rel_e=target_e-surface_e
     target_tvdss=float(t.get('tvdss_m',0)); target_tvd=float(project.get('kb_m',0))-target_tvdss
     default_az=(math.degrees(math.atan2(rel_e,rel_n))%360.0) if abs(rel_n)+abs(rel_e)>1e-9 else 0.0
@@ -403,11 +419,15 @@ elif page=='Trajectory Planner':
     st.caption(f'Maximum inclination constraint: **{max_inc:.1f}°** • Target azimuth from project-grid geometry: **{default_az:.2f}° Grid**')
     kop=kop_ft*FT_TO_M; br=dls_100ft_to_30m(br_ft); td=target_tvd; n=rel_n; e=rel_e
     configured_td=project.get('well_architecture',{}).get('planned_td_md_m')
-    provisional_md_limit=float(configured_td) if configured_td else max(td + 2000.0, td * 2.0)
-    if not configured_td:
-        st.info(f'No planned TD MD is configured. For this calculation, a provisional trajectory limit of {provisional_md_limit*M_TO_FT:,.0f} ft MD is used (based on target TVD). Set the actual planned TD in Well Architecture for a design-specific limit.')
-    elif float(configured_td) <= td:
-        st.warning('Configured planned TD MD is at or shallower than target TVD. A target hit may be impossible; check the well architecture and depth references.')
+    internal_search_ceiling=max(td + 4000.0, td * 3.0, 3000.0)
+    use_max_md_limit=st.checkbox('Apply an explicit maximum MD constraint', value=False, help='Off by default: the planner calculates TD from the final required target. Turn this on only when the design has a genuine maximum measured-depth limit.')
+    if use_max_md_limit:
+        default_limit_ft=float(configured_td)*M_TO_FT if configured_td and float(configured_td)>0 else internal_search_ceiling*M_TO_FT
+        max_md_limit_ft=st.number_input('Maximum permitted MD (ft)', min_value=100.0, max_value=100000.0, value=float(min(100000.0,max(100.0,default_limit_ft))), step=100.0)
+        provisional_md_limit=max_md_limit_ft*FT_TO_M
+    else:
+        provisional_md_limit=internal_search_ceiling
+        st.caption(f'No maximum MD constraint applied. Internal search ceiling: {provisional_md_limit*M_TO_FT:,.0f} ft MD; final planned TD is calculated from target interception.')
     if target_tvd <= 0: st.error('Target TVD must be positive after applying the KB/TVDSS reference conversion.'); st.stop()
     max_build_ft=dls_30m_to_100ft(float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',br)))
     if br_ft > max_build_ft+1e-9: st.warning(f'Build rate exceeds the project maximum build-rate constraint of {max_build_ft:.2f}°/100 ft.')
@@ -437,9 +457,12 @@ elif page=='Trajectory Planner':
                     kop_mode=('fixed' if planning_mode == 'Optimize (fixed KOP)' else 'window' if planning_mode == 'Optimize (KOP window)' else 'free'),
                     kop_window_min_m=(kop_window_min_ft*FT_TO_M if kop_window_min_ft is not None else None),
                     kop_window_max_m=(kop_window_max_ft*FT_TO_M if kop_window_max_ft is not None else None),
+                    target_sequence=target_sequence if multi_target else None,
                 )
                 meta=dict(meta); meta['planning_mode']=planning_mode
             else:
+                if multi_target:
+                    raise ValueError('Multiple-target planning requires an optimization mode. Select Optimize (free KOP), Optimize (fixed KOP), or Optimize (KOP window) so the full ordered target sequence is evaluated.')
                 out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,max_md=provisional_md_limit,truncate_at_target=False,azimuth_turn_rate_deg_30m=dls_100ft_to_30m(turn_ft))
                 max_turn=float(project.get('design_constraints',{}).get('max_turn_rate_deg_30m',3.0) or 3.0)
                 meta['max_turn_rate_actual_deg_30m']=abs(dls_100ft_to_30m(turn_ft))
@@ -447,6 +470,15 @@ elif page=='Trajectory Planner':
                 if meta['constraint_violations'] or not meta.get('target_hit',False):
                     meta['status']='REVIEW'
                 meta['optimization_status']='FEASIBLE' if meta['status']=='PASS' else 'REVIEW'
+                meta['final_md_is_target_intercept']=False
+                if meta['status']=='PASS' and meta.get('target_intercept_md_m') is not None:
+                    out=truncate_trajectory_at_md(out,meta['target_intercept_md_m'])
+                    meta['final_md_m']=float(out['MD'].iloc[-1])
+                    meta['endpoint_north_m']=float(out['Northing'].iloc[-1])
+                    meta['endpoint_east_m']=float(out['Easting'].iloc[-1])
+                    meta['endpoint_tvd_m']=float(out['TVD'].iloc[-1])
+                    meta['final_inclination_deg']=float(out['Inc'].iloc[-1])
+                    meta['final_md_is_target_intercept']=True
                 meta=dict(meta); meta['planning_mode']='Manual profile'
             # Preserve a dedicated planned candidate as well as the legacy active survey.
             # Survey Manager may later replace project['surveys'] with imported/measured data;
@@ -477,6 +509,14 @@ elif page=='Trajectory Planner':
         else: st.warning(result_line + ' • Target/profile feasibility needs review.')
         if meta.get('target_intercept_md_m') is not None:
             st.caption(f"Best target approach: {float(meta['target_intercept_md_m'])*M_TO_FT:,.1f} ft MD • target miss beyond tolerance: {float(meta.get('target_miss_distance_m',max(0.0,float(meta.get('lateral_error_m',0))-30.48)))*M_TO_FT:,.1f} ft")
+        if meta.get('target_sequence_results'):
+            st.markdown('#### Required target sequence')
+            seq_display=pd.DataFrame(meta['target_sequence_results']).copy()
+            if 'intercept_md_m' in seq_display: seq_display['intercept_md_ft']=seq_display['intercept_md_m']*M_TO_FT
+            for col in ['lateral_error_m','vertical_error_m','miss_distance_m']:
+                if col in seq_display: seq_display[col.replace('_m','_ft')]=seq_display[col]*M_TO_FT
+            st.dataframe(seq_display.drop(columns=[c for c in ['intercept_md_m','lateral_error_m','vertical_error_m','miss_distance_m'] if c in seq_display]),use_container_width=True,hide_index=True)
+            st.caption('All required targets must be intercepted in order. The final required target defines the target-terminated TD when the complete trajectory is feasible.')
         if saved_mode=='Optimize selected profile to target':
             st.metric('Optimization outcome',meta.get('optimization_status','REVIEW'))
             st.caption(f"Objective score: {float(meta.get('objective_m',float('nan'))):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {float(meta.get('max_dls_deg_30m',float('nan'))):.2f}°/30 m")
