@@ -101,3 +101,10 @@
 - Trajectory Planner now restores and displays the saved candidate on page revisit rather than rendering results only during the generation-button rerun.
 - Full/compact survey display is a view-only control with a stable Streamlit key; it does not run the optimizer or replace the candidate.
 - Survey Manager may replace the active survey collection without destroying the separately saved planned candidate.
+
+## 2026-10-12 — Target interception and Survey Manager export
+
+- Updated optimizer target evaluation to inspect the full trajectory, including horizontal/near-horizontal sections after the first target-TVD crossing. This prevents a valid later intersection along a horizontal hold from being ignored.
+- Target-intercept MD metadata now reflects the selected best target approach rather than always reporting the first TVD crossing.
+- Added Survey Manager CSV export for the calculated/stored survey in field units; covariance matrices are excluded and uncertainty lengths are displayed/exported in feet.
+- Added a regression test for a horizontal section that reaches the target laterally after its first target-TVD crossing.

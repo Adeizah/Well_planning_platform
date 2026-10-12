@@ -335,6 +335,8 @@ elif page=='Survey Manager':
         sv=pd.DataFrame(project['surveys']).copy()
         for col in ['MD','TVD','TVDSS','Northing','Easting','VS']:
             if col in sv.columns: sv[col]=sv[col]*M_TO_FT
+        for col in [c for c in sv.columns if c.startswith('Unc_') and c.endswith('_m')]:
+            sv[col]=sv[col]*M_TO_FT
         if 'DLS' in sv.columns:
             stored_interval=float(project.get('trajectory_metadata',{}).get('dls_interval_m',30.0))
             sv['DLS']=sv['DLS'].map(lambda x: dls_for_interval_to_100ft(x, stored_interval))
@@ -342,6 +344,13 @@ elif page=='Survey Manager':
         uncertainty_cols=[c for c in sv.columns if c.startswith('Unc_')]
         display_cols=[c for c in sv.columns if c not in cov_cols+uncertainty_cols]
         st.dataframe(sv[display_cols],use_container_width=True,hide_index=True)
+        # Export the currently stored/calculated Survey Manager trajectory in field units.
+        export_df=sv[display_cols].copy()
+        csv_bytes=export_df.to_csv(index=False).encode('utf-8-sig')
+        project_name=''.join(ch if ch.isalnum() or ch in '-_' else '_' for ch in str(project.get('well_name') or project.get('project_name') or 'well_survey'))
+        st.download_button('Export survey as CSV', data=csv_bytes,
+                           file_name=f'{project_name}_survey.csv', mime='text/csv',
+                           help='Downloads the displayed survey data in field units. Covariance matrices are excluded; uncertainty summary columns are retained when available.')
         if {'Unc_major_1sigma_m','Unc_minor_1sigma_m','Unc_vertical_1sigma_m'}.issubset(project.get('surveys',[{}])[-1].keys()):
             last=project['surveys'][-1]
             st.info(f"End-of-survey 1σ uncertainty: major {float(last['Unc_major_1sigma_m'])*M_TO_FT:.1f} ft • minor {float(last['Unc_minor_1sigma_m'])*M_TO_FT:.1f} ft • vertical {float(last['Unc_vertical_1sigma_m'])*M_TO_FT:.1f} ft • ellipse azimuth {float(last['Unc_azimuth_deg']):.1f}° Grid")
