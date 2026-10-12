@@ -108,3 +108,9 @@
 - Target-intercept MD metadata now reflects the selected best target approach rather than always reporting the first TVD crossing.
 - Added Survey Manager CSV export for the calculated/stored survey in field units; covariance matrices are excluded and uncertainty lengths are displayed/exported in feet.
 - Added a regression test for a horizontal section that reaches the target laterally after its first target-TVD crossing.
+
+## Targeted optimizer correction (2026-10-12)
+- Reparameterized optimizer azimuth as a signed deviation from the wellhead-to-target bearing, avoiding the 0°/360° search-boundary issue for due-north targets.
+- Added a modest target-centre tie-breaker so candidates inside a target footprint are not all treated as equally desirable regardless of centre miss.
+- Increased default search effort moderately while keeping the test suite runtime practical.
+- Exercised the distant, nearly due-north ERD case against the revised optimizer; it now returns a feasible candidate within the configured circular target in the local validation run.
