@@ -160,6 +160,46 @@ def trajectory_3d(df):
     return df[["Easting", "Northing", "TVD"]].copy()
 
 
+def truncate_trajectory_at_md(path, target_md):
+    """Return a path ending exactly at target_md, interpolating a final station.
+
+    Used only after independent target and constraint checks confirm a valid
+    intercept. Preserves all numeric survey columns and avoids leaving the well
+    artificially extended to the planned search-depth ceiling.
+    """
+    if path is None or len(path) == 0 or target_md is None:
+        return path.copy() if path is not None else path
+    df = path.copy().sort_values("MD").reset_index(drop=True)
+    md = float(target_md)
+    if md < float(df["MD"].iloc[0]) - 1e-8 or md > float(df["MD"].iloc[-1]) + 1e-8:
+        raise ValueError("Target MD lies outside the calculated trajectory.")
+    before = df[df["MD"] < md - 1e-8]
+    exact = df[np.isclose(df["MD"].to_numpy(dtype=float), md, atol=1e-8)]
+    if not exact.empty:
+        result = df[df["MD"] <= md + 1e-8].copy().reset_index(drop=True)
+        return result
+    hi_idx = int(np.searchsorted(df["MD"].to_numpy(dtype=float), md, side="right"))
+    if hi_idx <= 0:
+        return df.iloc[[0]].copy().reset_index(drop=True)
+    if hi_idx >= len(df):
+        return df.copy()
+    lo, hi = df.iloc[hi_idx - 1], df.iloc[hi_idx]
+    frac = (md - float(lo["MD"])) / max(float(hi["MD"]) - float(lo["MD"]), 1e-12)
+    row = {}
+    for col in df.columns:
+        try:
+            a, b = float(lo[col]), float(hi[col])
+            if col == "MD": row[col] = md
+            elif col == "Azi":
+                delta = (b - a + 180.0) % 360.0 - 180.0
+                row[col] = (a + frac * delta) % 360.0
+            else: row[col] = a + frac * (b - a)
+        except (TypeError, ValueError):
+            row[col] = lo[col]
+    result = pd.concat([before, pd.DataFrame([row])], ignore_index=True)
+    return result
+
+
 def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg,
                                hold_azi_deg, target_tvd, target_north, target_east,
                                drop_rate_deg_30m=None, final_inc_deg=0.0,
@@ -265,15 +305,18 @@ def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg
     eval_point = target_crossing if target_crossing is not None else end
     lateral_error = float(np.hypot(float(eval_point["Northing"])-target_north, float(eval_point["Easting"])-target_east))
     tvd_error = float(eval_point["TVD"]-target_tvd) if target_crossing is not None else float(end["TVD"]-target_tvd)
+    build_end_for_check = float(kop + abs(peak_inc) / br * 30.0) if profile != "Vertical" else 0.0
     drop_end_for_check = (float(drop_start + drop_len)
                           if drop_start is not None and post_profile == "drop" else None)
-    section_order_ok = (drop_end_for_check is None or target_crossing is None
-                        or float(target_crossing["MD"]) + 1e-6 >= drop_end_for_check)
+    required_section_end = drop_end_for_check if drop_end_for_check is not None else build_end_for_check
+    section_order_ok = (target_crossing is None or float(target_crossing["MD"]) + 1e-6 >= required_section_end)
     target_hit = lateral_error <= 30.48 and abs(tvd_error) <= 30.48
     result = {
         "status": "PASS" if target_hit and section_order_ok else "REVIEW",
         "target_hit": bool(target_hit),
         "section_order_ok": bool(section_order_ok),
+        "target_intercept_valid": bool(target_hit and section_order_ok),
+        "required_profile_section_end_md_m": float(required_section_end),
         "target_miss_distance_m": float(max(0.0, lateral_error - 30.48)),
         "profile": profile, "lateral_error_m": lateral_error, "tvd_error_m": tvd_error,
         "azimuth_turn_rate_deg_30m": turn_rate,
@@ -294,6 +337,6 @@ def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg
                              "Drop end": float(drop_start + drop_len) if drop_start is not None else None,
                              "Target TVD crossing": float(eval_point["MD"]) if target_crossing is not None else None,
                              "Planned TD": float(out.iloc[-1]["MD"])},
-        "note": "Practice-grade profile generation; target interception is evaluated separately from planned TD. Verify target fit, DLS, constraints and survey conventions before engineering use."
+        "note": "Target TVD crossing is not automatically a valid target intercept. PASS requires target footprint/depth tolerance and completion of the profile's required section before intercept. A valid target intercept may be used as the final MD."
     }
     return out, result

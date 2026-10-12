@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 import numpy as np
 from scipy.optimize import differential_evolution
-from core.trajectory import generate_profile_candidate
+from core.trajectory import generate_profile_candidate, truncate_trajectory_at_md
 from core.geometry import target_contains, target_boundary
 
 DROPPING = {'S-Profile', 'Build-Hold-Drop', 'Custom'}
@@ -105,12 +105,23 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
                         target_geometry=None, point_tolerance_m=30.48,
                         station_interval_m=60.0, max_md_m=15000.0,
                         kop_mode="free", kop_window_min_m=None, kop_window_max_m=None,
-                        maxiter=22, popsize=8, seed=17):
+                        target_sequence=None, maxiter=22, popsize=8, seed=17):
     """Optimize KOP, build rate, peak inclination and azimuth; for S profiles,
     also optimize drop rate and final inclination. Objective balances target miss,
     DLS/inclination feasibility, and excessive MD. All distances are metres.
     """
     profile = str(profile)
+    # Ordered required target sequence. Coordinates are well-relative metres.
+    sequence = list(target_sequence or [])
+    if sequence:
+        for item in sequence:
+            if not all(k in item for k in ("tvd_m", "north_m", "east_m")):
+                raise ValueError("Each sequence target requires tvd_m, north_m and east_m.")
+        # The final required target defines the target-driven planned TD.
+        target_tvd_m = float(sequence[-1]["tvd_m"])
+        target_north_m = float(sequence[-1]["north_m"])
+        target_east_m = float(sequence[-1]["east_m"])
+        target_geometry = sequence[-1].get("geometry", target_geometry)
     kop_mode = str(kop_mode).lower().replace(" ", "_").replace("-", "_")
     if kop_mode not in {"free", "fixed", "window"}:
         raise ValueError("KOP mode must be free, fixed, or window.")
@@ -126,12 +137,23 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
             target_tvd_m, target_north_m, target_east_m,
             station_interval=station_interval_m, max_md=max_md_m, truncate_at_target=False)
         lat, vert, md, miss = _target_residual(path, target_tvd_m, target_north_m, target_east_m, target_geometry, point_tolerance_m)
+        vertical_sequence_results=[]
+        if sequence:
+            prev=-1.0
+            for item in sequence:
+                ilat, ivert, imd, imiss = _target_residual(path, float(item['tvd_m']), float(item['north_m']), float(item['east_m']), item.get('geometry'), float(item.get('tolerance_m', point_tolerance_m)))
+                ordered=imd>prev+1e-3
+                vertical_sequence_results.append({'name':str(item.get('name','Target')),'intercept_md_m':float(imd),'lateral_error_m':float(ilat),'vertical_error_m':float(ivert),'miss_distance_m':float(imiss),'within_tolerance':bool(imiss<=1.0 and abs(ivert)<=30.48),'in_order':bool(ordered)})
+                prev=imd
+            if vertical_sequence_results:
+                lat,vert,md,miss=(vertical_sequence_results[-1]['lateral_error_m'],vertical_sequence_results[-1]['vertical_error_m'],vertical_sequence_results[-1]['intercept_md_m'],vertical_sequence_results[-1]['miss_distance_m'])
         inc = np.asarray(path['Inc'], dtype=float)
         dls = np.asarray(path['DLS'], dtype=float)
         max_inc = float(np.max(inc, initial=0.0))
         max_dls = float(np.max(dls, initial=0.0))
         violations = []
-        if miss > 1.0 or abs(vert) > 30.48:
+        sequence_ok = all(x['within_tolerance'] and x['in_order'] for x in vertical_sequence_results) if sequence else True
+        if miss > 1.0 or abs(vert) > 30.48 or not sequence_ok:
             violations.append('target_intersection')
         if max_inc > max_inclination_deg + 1e-6:
             violations.append('maximum_inclination')
@@ -142,7 +164,10 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
                      'status':'PASS' if feasible else 'REVIEW', 'constraint_violations':violations,
                      'max_inclination_deg':max_inc, 'max_dls_deg_30m':max_dls,
                      'objective_m':miss+abs(vert)*4+md*0.001,'target_lateral_error_m':lat,'target_miss_distance_m':miss,'target_vertical_error_m':vert,
-                     'target_intercept_md_m':meta.get('target_intercept_md_m'),
+                     'target_intercept_md_m':md,
+                     'target_sequence_results':vertical_sequence_results if sequence else [],
+                     'required_target_count':len(sequence) if sequence else 1,
+                     'target_sequence_feasible':bool(sequence_ok),
                      'optimized_parameters':{'profile':'Vertical'}})
         return path, meta
 
@@ -208,6 +233,19 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
                 station_interval=interval, max_md=max_md_m, truncate_at_target=False,
                 azimuth_turn_rate_deg_30m=turn_rate)
             lat, vert, md, miss = _target_residual(path, target_tvd_m, target_north_m, target_east_m, target_geometry, point_tolerance_m)
+            sequence_results = []
+            sequence_penalty = 0.0
+            if sequence:
+                previous_md = -1.0
+                for item in sequence:
+                    geom = item.get("geometry")
+                    ilat, ivert, imd, imiss = _target_residual(path, float(item["tvd_m"]), float(item["north_m"]), float(item["east_m"]), geom, float(item.get("tolerance_m", point_tolerance_m)))
+                    ordered = imd > previous_md + 1e-3
+                    sequence_results.append({"name": str(item.get("name", "Target")), "intercept_md_m": float(imd), "lateral_error_m": float(ilat), "vertical_error_m": float(ivert), "miss_distance_m": float(imiss), "within_tolerance": bool(imiss <= 1.0 and abs(ivert) <= 30.48), "in_order": bool(ordered)})
+                    sequence_penalty += imiss + 4.0 * abs(ivert) + (0.0 if ordered else 100000.0)
+                    previous_md = imd
+                # The final required target governs the endpoint and feasibility.
+                lat, vert, md, miss = (sequence_results[-1]["lateral_error_m"], sequence_results[-1]["vertical_error_m"], sequence_results[-1]["intercept_md_m"], sequence_results[-1]["miss_distance_m"])
             inc = np.asarray(path['Inc'], dtype=float)
             dls = np.asarray(path['DLS'], dtype=float)
             inc_pen = max(0.0, float(np.max(inc, initial=0))-max_inclination_deg)
@@ -223,18 +261,26 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
             # For a drop profile, the target should not be intercepted before
             # the planned drop has completed. Otherwise an apparently good target
             # score can hide an S-profile whose defining section lies below target.
-            section_order_penalty = 0.0
+            build_end_md = kop + abs(peak) / max(br, 1e-9) * 30.0
+            required_section_end_md = build_end_md
             if profile in DROPPING and drop_start_md is not None:
-                drop_end_md = float(drop_start_md) + drop_len
-                section_order_penalty = max(0.0, drop_end_md - float(md)) * 3.0
+                required_section_end_md = float(drop_start_md) + drop_len
+            # Do not accept a target reached during build when the selected profile
+            # requires the build to finish first (especially Horizontal/ERD).
+            section_order_penalty = max(0.0, required_section_end_md - float(md)) * 3.0
             # Treat physical limits as hard constraints for search purposes. A candidate that
             # hits the target by violating inclination/DLS must not beat a feasible
             # candidate merely because its geometric miss is smaller.
-            score = (miss + 4.0*abs(vert) + 100000.0*inc_pen + 100000.0*dls_pen
+            target_score = sequence_penalty if sequence else (miss + 4.0*abs(vert))
+            score = (target_score + 100000.0*inc_pen + 100000.0*dls_pen
                      + 100000.0*turn_pen + section_order_penalty + 0.001*md)
             if detailed:
+                sequence_ok = all(x['within_tolerance'] and x['in_order'] for x in sequence_results) if sequence else True
                 meta.update({'target_lateral_error_m':lat,'target_miss_distance_m':miss,'target_vertical_error_m':vert,
                     'target_tvd_crossing_md_m':md, 'target_intercept_md_m':md,
+                    'target_sequence_results': sequence_results if sequence else [],
+                    'required_target_count': len(sequence) if sequence else 1,
+                    'target_sequence_feasible': bool(sequence_ok),
                     'objective_m':score,'section_order_penalty_m':section_order_penalty,'max_inclination_deg':float(np.max(inc, initial=0)),
                     'max_dls_deg_30m':float(np.max(dls, initial=0)), 'max_turn_rate_actual_deg_30m':max_turn_actual,
                     'optimized_parameters':{'profile':profile,'KOP_MD_m':kop,'build_rate_deg_30m':br,
@@ -242,15 +288,15 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
                         'drop_rate_deg_30m':dr if profile in DROPPING else None,
                         'final_inclination_deg':fin if profile in DROPPING else None,
                         'drop_start_md_m':drop_start_md if profile in DROPPING else None},
-                    'optimizer':'SciPy differential_evolution','constraint_violations':([name for name, failed in [('target_intersection', miss > 1.0 or abs(vert) > 30.48), ('maximum_inclination', inc_pen > 0), ('maximum_DLS', dls_pen > 0), ('maximum_turn_rate', turn_pen > 0), ('drop_section_before_target', section_order_penalty > 1e-6)] if failed]),
-                    'optimization_status':'FEASIBLE' if miss <= 1.0 and abs(vert) <= 30.48 and inc_pen == 0 and dls_pen == 0 and turn_pen == 0 and section_order_penalty <= 1e-6 else 'REVIEW'})
+                    'optimizer':'SciPy differential_evolution','constraint_violations':([name for name, failed in [('target_intersection', miss > 1.0 or abs(vert) > 30.48 or not sequence_ok), ('maximum_inclination', inc_pen > 0), ('maximum_DLS', dls_pen > 0), ('maximum_turn_rate', turn_pen > 0), ('drop_section_before_target', section_order_penalty > 1e-6)] if failed]),
+                    'optimization_status':'FEASIBLE' if miss <= 1.0 and abs(vert) <= 30.48 and sequence_ok and inc_pen == 0 and dls_pen == 0 and turn_pen == 0 and section_order_penalty <= 1e-6 else 'REVIEW'})
                 return path, meta
             return score
         except (ValueError, TypeError, KeyError, FloatingPointError):
             return 1e9
 
     # Keep the user's current settings in the initial population where compatible.
-    result = differential_evolution(evaluate, bounds, maxiter=(int(math.ceil(int(maxiter)*1.5)) if int(maxiter) >= 5 else int(maxiter)), popsize=int(popsize),
+    result = differential_evolution(evaluate, bounds, maxiter=(int(math.ceil(int(maxiter)*2.5)) if int(maxiter) >= 5 else int(maxiter)), popsize=int(popsize),
                                     seed=int(seed), polish=True, updating='immediate', workers=1,
                                     x0=[min(max(float(kop_initial_m), bounds[0][0]), bounds[0][1]),
                                         min(max(float(build_rate_initial_deg_30m), bounds[1][0]), bounds[1][1]),
@@ -261,6 +307,15 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
     best_x = result.x
     fine_interval = min(15.0, max(5.0, float(station_interval_m)/4.0))
     path, meta = evaluate(best_x, detailed=True, interval=fine_interval)
+    # A candidate is feasible only when the target footprint/depth and required
+    # profile section are satisfied and all physical constraints pass. Only then
+    # terminate the trajectory at the selected target-intercept MD; failed
+    # candidates retain their full path for diagnosis and never masquerade as TD.
+    if meta.get('optimization_status') == 'FEASIBLE' and meta.get('target_intercept_md_m') is not None:
+        path = truncate_trajectory_at_md(path, meta['target_intercept_md_m'])
+        meta['final_md_is_target_intercept'] = True
+    else:
+        meta['final_md_is_target_intercept'] = False
     meta['kop_mode'] = kop_mode
     meta['kop_constraint_m'] = ({'fixed_m': float(kop_initial_m)} if kop_mode == 'fixed' else
                                 {'minimum_m': float(kop_lo), 'maximum_m': float(kop_upper)} if kop_mode == 'window' else
