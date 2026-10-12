@@ -175,7 +175,10 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
             raise ValueError("KOP window must satisfy 0 ≤ minimum ≤ maximum ≤ maximum planned MD.")
     else:
         kop_lo, kop_upper = 0.0, kop_hi
-    bounds = [(kop_lo, kop_upper), (0.25, max_br), (peak_lo, peak_hi), (-180.0, 180.0)]
+    max_turn = float(max_turn_rate_deg_30m)
+    if max_turn <= 0:
+        raise ValueError("Maximum turn rate must be positive.")
+    bounds = [(kop_lo, kop_upper), (0.25, max_br), (peak_lo, peak_hi), (-180.0, 180.0), (-max_turn, max_turn)]
     if profile in DROPPING:
         bounds.extend([(0.25, min(float(max_dls_deg_30m), float(max_build_rate_deg_30m))), (0.0, peak_hi), (0.2, 0.95)])
     elif profile == 'Custom':
@@ -185,16 +188,16 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
         pass
 
     def unpack(x):
-        kop, br, peak, azimuth_delta = x[:4]
+        kop, br, peak, azimuth_delta, turn_rate = x[:5]
         azi = (target_azimuth + float(azimuth_delta)) % 360.0
-        dr = x[4] if profile in DROPPING else float(drop_rate_initial_deg_30m)
+        dr = x[5] if profile in DROPPING else float(drop_rate_initial_deg_30m)
         # A genuine S / build-hold-drop needs a meaningful inclination reduction.
-        fin = min(float(x[5]), max(0.0, peak - 5.0)) if profile in DROPPING else float(final_inc_initial_deg)
-        drop_fraction = float(x[6]) if profile in DROPPING else 0.70
-        return float(kop), float(br), float(peak), float(azi), float(dr), float(fin), drop_fraction
+        fin = min(float(x[6]), max(0.0, peak - 5.0)) if profile in DROPPING else float(final_inc_initial_deg)
+        drop_fraction = float(x[7]) if profile in DROPPING else 0.70
+        return float(kop), float(br), float(peak), float(azi), float(dr), float(fin), drop_fraction, float(turn_rate)
 
     def evaluate(x, detailed=False, interval=station_interval_m):
-        kop, br, peak, azi, dr, fin, drop_fraction = unpack(x)
+        kop, br, peak, azi, dr, fin, drop_fraction, turn_rate = unpack(x)
         try:
             drop_len = abs(peak-fin)/max(dr, 1e-9)*30.0 if profile in DROPPING else 0.0
             build_end = kop + abs(peak)/max(br, 1e-9)*30.0
@@ -202,12 +205,19 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
             path, meta = generate_profile_candidate(profile, kop, br, peak, azi,
                 target_tvd_m, target_north_m, target_east_m,
                 drop_rate_deg_30m=dr, final_inc_deg=fin, drop_start_md=drop_start_md,
-                station_interval=interval, max_md=max_md_m, truncate_at_target=False)
+                station_interval=interval, max_md=max_md_m, truncate_at_target=False,
+                azimuth_turn_rate_deg_30m=turn_rate)
             lat, vert, md, miss = _target_residual(path, target_tvd_m, target_north_m, target_east_m, target_geometry, point_tolerance_m)
             inc = np.asarray(path['Inc'], dtype=float)
             dls = np.asarray(path['DLS'], dtype=float)
             inc_pen = max(0.0, float(np.max(inc, initial=0))-max_inclination_deg)
-            dls_pen = max(0.0, float(np.max(dls, initial=0))-max_dls_deg_30m)
+            dls_pen = max(0.0, float(np.max(dls, initial=0))-max_dls_deg_30m-1e-6)
+            # Independently enforce azimuth turn rate per 30 m measured depth.
+            azi_values = np.unwrap(np.radians(np.asarray(path["Azi"], dtype=float)))
+            md_values = np.asarray(path["MD"], dtype=float)
+            turn_rates = np.abs(np.degrees(np.diff(azi_values)) / np.maximum(np.diff(md_values), 1e-12) * 30.0)
+            max_turn_actual = float(np.max(turn_rates, initial=0.0))
+            turn_pen = max(0.0, max_turn_actual-max_turn-1e-6)
             # Miss distance dominates; vertical miss is weighted because target
             # depth is normally a hard target constraint. MD is a modest tie-breaker.
             # For a drop profile, the target should not be intercepted before
@@ -221,32 +231,32 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
             # hits the target by violating inclination/DLS must not beat a feasible
             # candidate merely because its geometric miss is smaller.
             score = (miss + 4.0*abs(vert) + 100000.0*inc_pen + 100000.0*dls_pen
-                     + section_order_penalty + 0.001*md)
+                     + 100000.0*turn_pen + section_order_penalty + 0.001*md)
             if detailed:
                 meta.update({'target_lateral_error_m':lat,'target_miss_distance_m':miss,'target_vertical_error_m':vert,
-                    'target_intercept_md_m':md,
+                    'target_tvd_crossing_md_m':md, 'target_intercept_md_m':md,
                     'objective_m':score,'section_order_penalty_m':section_order_penalty,'max_inclination_deg':float(np.max(inc, initial=0)),
-                    'max_dls_deg_30m':float(np.max(dls, initial=0)),
+                    'max_dls_deg_30m':float(np.max(dls, initial=0)), 'max_turn_rate_actual_deg_30m':max_turn_actual,
                     'optimized_parameters':{'profile':profile,'KOP_MD_m':kop,'build_rate_deg_30m':br,
-                        'peak_inclination_deg':peak,'azimuth_deg_grid':azi,
+                        'peak_inclination_deg':peak,'azimuth_deg_grid':azi, 'azimuth_turn_rate_deg_30m':turn_rate,
                         'drop_rate_deg_30m':dr if profile in DROPPING else None,
                         'final_inclination_deg':fin if profile in DROPPING else None,
                         'drop_start_md_m':drop_start_md if profile in DROPPING else None},
-                    'optimizer':'SciPy differential_evolution','constraint_violations':([name for name, failed in [('target_intersection', miss > 1.0 or abs(vert) > 30.48), ('maximum_inclination', inc_pen > 0), ('maximum_DLS', dls_pen > 0), ('drop_section_before_target', section_order_penalty > 1e-6)] if failed]),
-                    'optimization_status':'FEASIBLE' if miss <= 1.0 and abs(vert) <= 30.48 and inc_pen == 0 and dls_pen == 0 and section_order_penalty <= 1e-6 else 'REVIEW'})
+                    'optimizer':'SciPy differential_evolution','constraint_violations':([name for name, failed in [('target_intersection', miss > 1.0 or abs(vert) > 30.48), ('maximum_inclination', inc_pen > 0), ('maximum_DLS', dls_pen > 0), ('maximum_turn_rate', turn_pen > 0), ('drop_section_before_target', section_order_penalty > 1e-6)] if failed]),
+                    'optimization_status':'FEASIBLE' if miss <= 1.0 and abs(vert) <= 30.48 and inc_pen == 0 and dls_pen == 0 and turn_pen == 0 and section_order_penalty <= 1e-6 else 'REVIEW'})
                 return path, meta
             return score
         except (ValueError, TypeError, KeyError, FloatingPointError):
             return 1e9
 
     # Keep the user's current settings in the initial population where compatible.
-    result = differential_evolution(evaluate, bounds, maxiter=int(maxiter), popsize=int(popsize),
+    result = differential_evolution(evaluate, bounds, maxiter=(int(math.ceil(int(maxiter)*1.5)) if int(maxiter) >= 5 else int(maxiter)), popsize=int(popsize),
                                     seed=int(seed), polish=True, updating='immediate', workers=1,
                                     x0=[min(max(float(kop_initial_m), bounds[0][0]), bounds[0][1]),
                                         min(max(float(build_rate_initial_deg_30m), bounds[1][0]), bounds[1][1]),
                                         min(max(float(peak_inc_initial_deg), bounds[2][0]), bounds[2][1]),
-                                        ((float(azimuth_initial_deg) - target_azimuth + 180.0) % 360.0) - 180.0] + ([min(max(float(drop_rate_initial_deg_30m), bounds[4][0]), bounds[4][1]),
-                                        min(max(float(final_inc_initial_deg), bounds[5][0]), bounds[5][1]), 0.70] if profile in DROPPING else []))
+                                        ((float(azimuth_initial_deg) - target_azimuth + 180.0) % 360.0) - 180.0, 0.0] + ([min(max(float(drop_rate_initial_deg_30m), bounds[5][0]), bounds[5][1]),
+                                        min(max(float(final_inc_initial_deg), bounds[6][0]), bounds[6][1]), 0.70] if profile in DROPPING else []))
     # Rebuild at finer station interval and report final feasibility honestly.
     best_x = result.x
     fine_interval = min(15.0, max(5.0, float(station_interval_m)/4.0))
@@ -266,6 +276,7 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
     meta['build_length_m'] = meta['build_end_md_m']-float(params.get('KOP_MD_m', 0))
     meta['hold_inclination_deg'] = float(params.get('peak_inclination_deg', 0))
     meta['planning_azimuth_deg'] = float(params.get('azimuth_deg_grid', 0))
+    meta['azimuth_turn_rate_deg_30m'] = float(params.get('azimuth_turn_rate_deg_30m', 0.0))
     meta['drop_start_md_m'] = params.get('drop_start_md_m')
     meta['final_inclination_deg'] = float(path.iloc[-1]['Inc'])
     meta['final_md_m'] = float(path.iloc[-1]['MD'])
