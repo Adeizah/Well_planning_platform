@@ -389,8 +389,15 @@ elif page=='Trajectory Planner':
     project['well_design']=profile
     save()
     if profile=='Custom': st.info('Custom currently uses a configurable build–hold–drop template. Optimization searches KOP, build rate, peak inclination, azimuth, drop start, drop rate and final inclination. Arbitrary user-defined multi-section control points are not yet implemented.')
-    planning_mode=st.radio('Planning mode',['Manual profile','Optimize selected profile to target'],horizontal=True,help='The optimizer searches profile-specific parameters including KOP, build rate, peak inclination and azimuth; S/Build-Hold-Drop also optimize drop rate and final inclination. It reports REVIEW if the target or constraints are not satisfied.')
-    a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold=c.number_input('Peak/hold inclination (°)',1.,max(1.0,max_inc),default_hold,help='Peak inclination for the selected profile. Horizontal uses 90°; ERD uses at least 75° and is capped at 88°. In optimization mode this is the initial/default inclination; the optimizer searches within the permitted range.'); az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
+    planning_mode=st.radio('Planning mode',['Manual profile','Optimize (free KOP)','Optimize (fixed KOP)','Optimize (KOP window)'],horizontal=True,help='Manual generates from entered parameters. Free KOP searches the permitted range. Fixed KOP holds your entered KOP exactly and optimizes other parameters. KOP window searches only inside your geological/operational interval.')
+    a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold=c.number_input('Peak/hold inclination (°)',1.,max(1.0,max_inc),default_hold,help='Peak inclination for the selected profile. Horizontal uses 90°; ERD uses at least 75° and is capped at 88°. Optimization searches within the permitted range.'); az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
+    kop_window_min_ft, kop_window_max_ft = None, None
+    if planning_mode == 'Optimize (KOP window)':
+        ka, kb = st.columns(2)
+        kop_window_min_ft = ka.number_input('Minimum permitted KOP MD (ft)', 0.0, 49213.0, max(0.0, kop_ft-100.0), key='kop_window_min_ft', help='Set this from known formation/lithology and offset-well experience.')
+        kop_window_max_ft = kb.number_input('Maximum permitted KOP MD (ft)', 0.0, 49213.0, min(49213.0, kop_ft+100.0), key='kop_window_max_ft', help='The optimizer cannot move KOP outside this interval.')
+        if kop_window_min_ft > kop_window_max_ft:
+            st.error('Minimum KOP must not exceed maximum KOP.')
     a,b=st.columns(2); dr_ft=a.number_input('Drop rate (°/100 ft)',.1,15.,3.0,help='Used by S-Profile and Build-Hold-Drop.'); final_inc=b.number_input('Final inclination after drop (°)',0.,max(1.0,max_inc),0.0,help='Used by S-Profile and Build-Hold-Drop.')
     a,b,c=st.columns(3); a.number_input('Target TVD (ft)',0.,49213.,target_tvd*M_TO_FT,disabled=True); b.number_input('Target Northing offset (ft)',-3280840.,3280840.,rel_n*M_TO_FT,disabled=True); c.number_input('Target Easting offset (ft)',-3280840.,3280840.,rel_e*M_TO_FT,disabled=True)
     st.caption(f'Maximum inclination constraint: **{max_inc:.1f}°** • Target azimuth from project-grid geometry: **{default_az:.2f}° Grid**')
@@ -412,7 +419,7 @@ elif page=='Trajectory Planner':
             requested_peak = 0.0 if profile == 'Vertical' else (90.0 if profile == 'Horizontal' else (min(max(hold,75.0),88.0) if profile == 'ERD' else hold))
             if requested_peak > max_inc + 1e-9:
                 raise ValueError(f'{profile} requires a peak inclination of {requested_peak:.1f}°, above the project maximum inclination of {max_inc:.1f}°. Update the design constraint first if this profile is intended.')
-            if planning_mode=='Optimize selected profile to target':
+            if planning_mode != 'Manual profile':
                 target_geometry=dict(t)
                 target_geometry['north_m']=rel_n
                 target_geometry['east_m']=rel_e
@@ -427,8 +434,11 @@ elif page=='Trajectory Planner':
                     drop_rate_initial_deg_30m=dls_100ft_to_30m(dr_ft), final_inc_initial_deg=final_inc,
                     target_geometry=target_geometry, point_tolerance_m=30.48,
                     station_interval_m=60.0, max_md_m=provisional_md_limit,
+                    kop_mode=('fixed' if planning_mode == 'Optimize (fixed KOP)' else 'window' if planning_mode == 'Optimize (KOP window)' else 'free'),
+                    kop_window_min_m=(kop_window_min_ft*FT_TO_M if kop_window_min_ft is not None else None),
+                    kop_window_max_m=(kop_window_max_ft*FT_TO_M if kop_window_max_ft is not None else None),
                 )
-                meta=dict(meta); meta['planning_mode']='Optimize selected profile to target'
+                meta=dict(meta); meta['planning_mode']=planning_mode
             else:
                 out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,max_md=provisional_md_limit,truncate_at_target=False)
                 meta=dict(meta); meta['planning_mode']='Manual profile'
@@ -439,7 +449,7 @@ elif page=='Trajectory Planner':
             project['planned_surveys']=records
             project['surveys']=records
             project['well_design']=profile
-            project['trajectory_metadata']={'planner':'Profile-aware multi-parameter optimizer' if planning_mode=='Optimize selected profile to target' else 'Piecewise profile candidate','planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z','survey_source':'planned'}
+            project['trajectory_metadata']={'planner':'Profile-aware multi-parameter optimizer' if planning_mode != 'Manual profile' else 'Piecewise profile candidate','planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z','survey_source':'planned'}
             project['planned_trajectory_metadata']=dict(project['trajectory_metadata'])
             save()
             st.success('Trajectory candidate saved. You can leave this page and return without recalculating it.')

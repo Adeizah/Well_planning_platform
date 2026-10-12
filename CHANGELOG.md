@@ -114,3 +114,11 @@
 - Added a modest target-centre tie-breaker so candidates inside a target footprint are not all treated as equally desirable regardless of centre miss.
 - Increased default search effort moderately while keeping the test suite runtime practical.
 - Exercised the distant, nearly due-north ERD case against the revised optimizer; it now returns a feasible candidate within the configured circular target in the local validation run.
+
+## 2026-10-12 — KOP-constrained optimization modes
+- Added explicit `Optimize (free KOP)`, `Optimize (fixed KOP)`, and `Optimize (KOP window)` modes alongside `Manual profile`.
+- Fixed-KOP mode uses an equal-bound KOP variable, so optimization cannot silently move the entered KOP.
+- KOP-window mode bounds the optimizer to the user-specified minimum and maximum KOP MD; the interval is converted from ft in the UI to the optimizer's internal metres.
+- Optimization metadata now records the KOP mode and applied constraint.
+- Added regression tests for fixed KOP, KOP-window enforcement, and invalid-window rejection.
+- Validation: 50 tests passed; Python compilation passed. Streamlit interactive browser testing was not performed.
