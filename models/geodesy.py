@@ -1,10 +1,6 @@
 import math
 import requests
-from pyproj import CRS, Transformer, Proj
-from pyproj.aoi import AreaOfInterest
-from pyproj.database import query_crs_info
-from pyproj.enums import PJType
-from pyproj.transformer import TransformerGroup
+from pyproj import CRS, Transformer, Proj, database
 
 NOAA_GEOID_URL = "https://geodesy.noaa.gov/api/geoid/ght"
 
@@ -22,104 +18,126 @@ def crs_info(crs_code):
     }
 
 
-def common_crs_registry():
-    """Curated CRSs commonly useful for well planning; units remain CRS-native."""
-    return [
-        {"label": "WGS 84 geographic (EPSG:4326)", "code": "EPSG:4326", "region": "Global"},
-        {"label": "WGS 84 / UTM zone 31N (EPSG:32631)", "code": "EPSG:32631", "region": "Global"},
-        {"label": "WGS 84 / UTM zone 32N (EPSG:32632)", "code": "EPSG:32632", "region": "Global"},
-        {"label": "WGS 84 / UTM zone 33N (EPSG:32633)", "code": "EPSG:32633", "region": "Global"},
-        {"label": "WGS 84 / UTM zone 31S (EPSG:32731)", "code": "EPSG:32731", "region": "Global"},
-        {"label": "WGS 84 / UTM zone 32S (EPSG:32732)", "code": "EPSG:32732", "region": "Global"},
-        {"label": "Minna geographic (EPSG:4263)", "code": "EPSG:4263", "region": "Nigeria"},
-        {"label": "Minna / UTM zone 31N (EPSG:26331)", "code": "EPSG:26331", "region": "Nigeria / West Africa"},
-        {"label": "Minna / UTM zone 32N (EPSG:26332)", "code": "EPSG:26332", "region": "Nigeria / West Africa"},
-        {"label": "NAD83 geographic (EPSG:4269)", "code": "EPSG:4269", "region": "North America"},
-        {"label": "ETRS89 geographic (EPSG:4258)", "code": "EPSG:4258", "region": "Europe"},
-        {"label": "WGS 84 3D geographic (EPSG:4979)", "code": "EPSG:4979", "region": "Global / 3D"},
-    ]
+def transform_coordinates(x, y, source_crs, target_crs, strict=False, lon=None, lat=None):
+    """Transform coordinates, optionally refusing unavailable/ballpark operations.
 
-
-def search_crs_registry(query, limit=30):
-    """Search the installed EPSG CRS database by name or authority code.
-
-    This searches the local PROJ database and does not require a network request.
-    """
-    q = str(query or "").strip().casefold()
-    if not q:
-        return []
-    results = []
-    for item in query_crs_info(auth_name="EPSG", allow_deprecated=False):
-        code = f"EPSG:{item.code}"
-        name = item.name or ""
-        if q in name.casefold() or q in code.casefold() or q == str(item.code).casefold():
-            results.append({"label": f"{name} ({code})", "code": code, "type": str(item.type)} if hasattr(item, "type") else {"label": f"{name} ({code})", "code": code})
-            if len(results) >= max(1, min(int(limit), 100)):
-                break
-    return results
-
-
-def transformation_report(source_crs, target_crs, lon=None, lat=None):
-    """Report available non-ballpark coordinate operations and missing-grid status.
-
-    lon/lat, when supplied, define a small area of interest in geographic degrees.
-    The report describes the locally installed PROJ resources; it is not a survey
-    certification or a guarantee of field accuracy.
+    Coordinates are always in the native axis units of the supplied CRSs. The
+    caller must not label coordinates with a new CRS without transforming them.
     """
     source = CRS.from_user_input(source_crs)
     target = CRS.from_user_input(target_crs)
-    aoi = None
+    kwargs = {"always_xy": True}
     if lon is not None and lat is not None:
-        lon, lat = float(lon), float(lat)
-        if -180 <= lon <= 180 and -90 <= lat <= 90:
-            aoi = AreaOfInterest(lon - 0.05, max(-90, lat - 0.05), lon + 0.05, min(90, lat + 0.05))
-    group = TransformerGroup(source, target, always_xy=True, area_of_interest=aoi, allow_ballpark=False)
-    operations = []
-    for tr in group.transformers:
-        operations.append({
-            "name": tr.name,
-            "description": tr.description,
-            "accuracy_m": None if tr.accuracy is None or tr.accuracy < 0 else float(tr.accuracy),
-            "definition": tr.definition,
-        })
-    missing = []
-    for op in group.unavailable_operations:
-        grids = []
-        for grid in getattr(op, "grids", []):
-            grids.append({"name": grid.short_name, "available": bool(grid.available), "url": grid.url})
-        missing.append({"name": op.name, "grids": grids})
-    return {
-        "source_crs": source.to_string(),
-        "source_name": source.name,
-        "target_crs": target.to_string(),
-        "target_name": target.name,
-        "operation_count": len(operations),
-        "best_available": bool(group.best_available),
-        "operations": operations,
-        "unavailable_operations": missing,
-        "has_missing_grids": bool(missing),
-        "area_of_interest_used": aoi is not None,
-    }
-
-
-def transform_coordinates(x, y, source_crs, target_crs, *, strict=False, lon=None, lat=None):
-    """Transform coordinates using PROJ; strict mode disallows ballpark operations.
-
-    For strict transformations, pass lon/lat when the location is known so PROJ
-    can choose a location-appropriate operation and report unavailable grids.
-    """
+        from pyproj.aoi import AreaOfInterest
+        kwargs["area_of_interest"] = AreaOfInterest(float(lon)-0.05, float(lat)-0.05, float(lon)+0.05, float(lat)+0.05)
     if strict:
-        report = transformation_report(source_crs, target_crs, lon=lon, lat=lat)
-        if report["operation_count"] == 0 or not report["best_available"]:
-            details = " Required grid resources may be missing." if report["has_missing_grids"] else ""
-            raise ValueError(f"No verified non-ballpark transformation is available from {source_crs} to {target_crs}.{details}")
-        transformer = Transformer.from_pipeline(report["operations"][0]["definition"])
-    else:
-        transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+        kwargs.update({"allow_ballpark": False, "only_best": True})
+    transformer = Transformer.from_crs(source, target, **kwargs)
     xx, yy = transformer.transform(float(x), float(y), errcheck=True)
     if not (math.isfinite(xx) and math.isfinite(yy)):
-        raise ValueError("Coordinate transformation returned non-finite coordinates.")
+        raise ValueError("Coordinate transformation returned a non-finite result.")
+    if strict and transformer.accuracy < 0:
+        raise ValueError("No stated-accuracy coordinate operation is available; use a suitable transformation/grid resource.")
     return float(xx), float(yy)
+
+
+def projected_unit_to_metre_factor(crs_code):
+    """Return metres per native coordinate unit for a projected CRS."""
+    crs = CRS.from_user_input(crs_code)
+    if not crs.is_projected:
+        raise ValueError("A projected CRS is required for grid coordinates.")
+    if not crs.axis_info:
+        raise ValueError("The projected CRS does not define coordinate units.")
+    factor = crs.axis_info[0].unit_conversion_factor
+    if factor is None or not math.isfinite(float(factor)) or float(factor) <= 0:
+        raise ValueError("The projected CRS has an unsupported coordinate-unit conversion.")
+    return float(factor)
+
+
+def projected_coordinates_to_metres(x, y, crs_code):
+    """Convert projected CRS-native Easting/Northing values to metres."""
+    factor = projected_unit_to_metre_factor(crs_code)
+    return float(x) * factor, float(y) * factor
+
+
+def metres_to_projected_coordinates(easting_m, northing_m, crs_code):
+    """Convert metre-based project grid coordinates to CRS-native coordinates."""
+    factor = projected_unit_to_metre_factor(crs_code)
+    return float(easting_m) / factor, float(northing_m) / factor
+
+
+def transform_projected_grid_metres(easting_m, northing_m, source_crs, target_crs):
+    """Transform stored metre-normalized grid coordinates between projected CRSs."""
+    x_src, y_src = metres_to_projected_coordinates(easting_m, northing_m, source_crs)
+    x_dst, y_dst = transform_coordinates(x_src, y_src, source_crs, target_crs, strict=True)
+    return projected_coordinates_to_metres(x_dst, y_dst, target_crs)
+
+
+def common_crs_registry():
+    """Curated geographic and projected CRSs commonly relevant to well planning."""
+    codes = ["EPSG:4326", "EPSG:4263", "EPSG:26331", "EPSG:26332", "EPSG:26333",
+             "EPSG:32631", "EPSG:32632", "EPSG:32633", "EPSG:32731", "EPSG:32732", "EPSG:32733",
+             "EPSG:4258", "EPSG:4269"]
+    rows = []
+    for code in codes:
+        try:
+            info = crs_info(code)
+            rows.append({"code": code, "name": info["name"], "datum": info["datum"],
+                         "type": info["type"], "units": info["units"]})
+        except Exception:
+            continue
+    # Include useful common CRSs where available in the installed PROJ database.
+    return rows
+
+
+def search_crs_registry(query, limit=50):
+    """Search installed EPSG CRS database by authority code, name, or datum."""
+    q = str(query or "").strip().casefold()
+    if not q:
+        return []
+    try:
+        infos = database.query_crs_info(auth_name="EPSG")
+    except Exception:
+        infos = []
+    rows = []
+    for info in infos:
+        code = f"{info.auth_name}:{info.code}"
+        try:
+            crs = CRS.from_authority(info.auth_name, info.code)
+            datum = crs.datum.name if crs.datum else "Unknown"
+            text = f"{code} {info.name} {datum}".casefold()
+            if q in text:
+                rows.append({"code": code, "name": info.name, "datum": datum,
+                             "type": "Projected" if crs.is_projected else ("Geographic" if crs.is_geographic else "Other"),
+                             "units": crs.axis_info[0].unit_name if crs.axis_info else "Unknown"})
+        except Exception:
+            continue
+        if len(rows) >= max(1, min(int(limit), 200)):
+            break
+    return rows
+
+
+def transformation_report(source_crs, target_crs, lon=None, lat=None):
+    """Summarize available transformation operations at an optional area of interest."""
+    source = CRS.from_user_input(source_crs)
+    target = CRS.from_user_input(target_crs)
+    kwargs = {"always_xy": True}
+    if lon is not None and lat is not None:
+        from pyproj.aoi import AreaOfInterest
+        kwargs["area_of_interest"] = AreaOfInterest(float(lon)-0.05, float(lat)-0.05, float(lon)+0.05, float(lat)+0.05)
+    group = Transformer.from_crs(source, target, **kwargs)
+    try:
+        operations = group.operations
+    except Exception:
+        operations = ()
+    best_kwargs = dict(kwargs)
+    best_kwargs.update({"allow_ballpark": False, "only_best": True})
+    best = Transformer.from_crs(source, target, **best_kwargs)
+    accuracy = best.accuracy
+    return {"source_crs": source.to_string(), "target_crs": target.to_string(),
+            "operation_count": max(1, len(operations)), "best_available": accuracy >= 0,
+            "accuracy_m": accuracy if accuracy >= 0 else None,
+            "description": best.description, "area_of_interest_used": lon is not None and lat is not None}
 
 
 def grid_convergence_deg(lat, lon, crs_code):
