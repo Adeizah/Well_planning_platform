@@ -118,26 +118,65 @@ def search_crs_registry(query, limit=50):
 
 
 def transformation_report(source_crs, target_crs, lon=None, lat=None):
-    """Summarize available transformation operations at an optional area of interest."""
+    """Report transformation availability without making the UI fail on AOI issues.
+
+    An area of interest can make PROJ reject operation construction when the
+    supplied location is outside the source CRS area or is itself derived from
+    invalid coordinates. Try the location-specific operation first, then retry
+    without an AOI for diagnostic purposes. This fallback is diagnostic only;
+    it does not certify a transformation for operational use.
+    """
     source = CRS.from_user_input(source_crs)
     target = CRS.from_user_input(target_crs)
-    kwargs = {"always_xy": True}
+    attempts = []
     if lon is not None and lat is not None:
-        from pyproj.aoi import AreaOfInterest
-        kwargs["area_of_interest"] = AreaOfInterest(float(lon)-0.05, float(lat)-0.05, float(lon)+0.05, float(lat)+0.05)
-    group = Transformer.from_crs(source, target, **kwargs)
-    try:
-        operations = group.operations
-    except Exception:
-        operations = ()
-    best_kwargs = dict(kwargs)
-    best_kwargs.update({"allow_ballpark": False, "only_best": True})
-    best = Transformer.from_crs(source, target, **best_kwargs)
-    accuracy = best.accuracy
+        try:
+            from pyproj.aoi import AreaOfInterest
+            aoi = AreaOfInterest(float(lon)-0.05, float(lat)-0.05,
+                                 float(lon)+0.05, float(lat)+0.05)
+            attempts.append({"always_xy": True, "area_of_interest": aoi})
+        except Exception:
+            pass
+    attempts.append({"always_xy": True})
+    errors = []
+    for kwargs in attempts:
+        try:
+            group = Transformer.from_crs(source, target, **kwargs)
+            try:
+                operations = group.operations
+            except Exception:
+                operations = ()
+            strict_kwargs = dict(kwargs)
+            strict_kwargs.update({"allow_ballpark": False, "only_best": True})
+            try:
+                best = Transformer.from_crs(source, target, **strict_kwargs)
+                # Force PROJ to resolve the operation now, not lazily in a later page.
+                if lon is not None and lat is not None:
+                    if source.is_geographic:
+                        best.transform(float(lon), float(lat), errcheck=True)
+                    elif target.is_geographic:
+                        # Only a diagnostic probe; actual projected coordinates
+                        # are not available to this report function.
+                        pass
+                accuracy = float(best.accuracy)
+                description = best.description
+                available = accuracy >= 0
+            except Exception as exc:
+                accuracy = -1.0
+                description = str(exc)
+                available = False
+            return {"source_crs": source.to_string(), "target_crs": target.to_string(),
+                    "operation_count": max(1, len(operations)), "best_available": available,
+                    "accuracy_m": accuracy if accuracy >= 0 else None,
+                    "description": description,
+                    "area_of_interest_used": "area_of_interest" in kwargs,
+                    "diagnostic_fallback_used": "area_of_interest" not in kwargs and lon is not None and lat is not None}
+        except Exception as exc:
+            errors.append(str(exc))
     return {"source_crs": source.to_string(), "target_crs": target.to_string(),
-            "operation_count": max(1, len(operations)), "best_available": accuracy >= 0,
-            "accuracy_m": accuracy if accuracy >= 0 else None,
-            "description": best.description, "area_of_interest_used": lon is not None and lat is not None}
+            "operation_count": 0, "best_available": False, "accuracy_m": None,
+            "description": "; ".join(errors) or "No coordinate operation could be constructed.",
+            "area_of_interest_used": False, "diagnostic_fallback_used": True}
 
 
 def grid_convergence_deg(lat, lon, crs_code):
