@@ -42,6 +42,9 @@ def test_covariance_clearance_returns_directional_uncertainty():
     assert len(rep) == 1
     assert rep.iloc[0]['directional_uncertainty_m'] > 0
     assert np.isfinite(rep.iloc[0]['separation_factor'])
+    assert np.isfinite(rep.iloc[0]['minimum_sf_main_md_m'])
+    assert np.isfinite(rep.iloc[0]['minimum_sf_offset_md_m'])
+    assert 'separation_factor_at_closest_approach' in rep.columns
 
 
 def test_vertical_trajectory_with_nonzero_angular_errors_has_nonzero_uncertainty():

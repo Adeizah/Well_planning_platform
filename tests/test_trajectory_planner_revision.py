@@ -103,3 +103,29 @@ def test_all_six_optimizer_profiles_return_constraint_diagnostics():
         assert 'constraint_violations' in meta, profile
         assert meta['final_md_m'] <= 3000.0 + 1e-8, profile
         assert meta['max_dls_deg_30m'] >= 0.0, profile
+
+
+def test_valid_manual_target_hit_ends_at_intercept_not_search_depth():
+    from core.trajectory import truncate_trajectory_at_md
+    path, meta = generate_profile_candidate(
+        'J-Profile', kop_md=100.0, build_rate_deg_30m=3.0,
+        hold_inc_deg=45.0, hold_azi_deg=90.0, target_tvd=500.0,
+        target_north=0.0, target_east=500.0, station_interval=30.0,
+        max_md=3000.0, truncate_at_target=False)
+    assert meta['target_intercept_found']
+    if meta['target_intercept_valid']:
+        trimmed = truncate_trajectory_at_md(path, meta['target_intercept_md_m'])
+        assert abs(float(trimmed['MD'].iloc[-1])-meta['target_intercept_md_m']) < 1e-6
+        assert float(trimmed['MD'].iloc[-1]) < float(path['MD'].iloc[-1])
+
+
+def test_horizontal_target_reached_during_build_is_not_valid_intercept():
+    path, meta = generate_profile_candidate(
+        'Horizontal', kop_md=100.0, build_rate_deg_30m=3.0,
+        hold_inc_deg=90.0, hold_azi_deg=90.0, target_tvd=100.0,
+        target_north=0.0, target_east=0.0, station_interval=10.0,
+        max_md=1000.0, truncate_at_target=False)
+    assert meta['target_intercept_found']
+    assert not meta['section_order_ok']
+    assert not meta['target_intercept_valid']
+    assert meta['status'] == 'REVIEW'
