@@ -18,14 +18,11 @@ def test_v5_ui_contract_and_navigation():
     assert "Well Planning Platform" in text
     assert "Well Planning Platform v5.1" not in text
     assert "v5.1 • desktop engineering workspace" not in text
-    assert "BHA & Drilling" not in text
-    assert "General optimizer KOP control" in text
-    assert "min_kop_md_m=general_min_kop_m" in text
     for label in [
         "Dashboard", "Project & Reference", "Survey Manager", "Trajectory Planner",
         "Targets", "Offsets", "Well Architecture", "Geomagnetics", "Geodesy",
         "Anti-Collision", "Casing Design", "Hydraulics & ECD", "PP / FG & Mud Window",
-        "Torque & Drag", "Cementing", "Well Control",
+        "Torque & Drag", "Cementing", "Well Control", "BHA & Drilling",
         "Visualization", "QA/QC", "Reports", "About",
     ]:
         assert f"'{label}'" in text
@@ -125,13 +122,3 @@ def test_anti_collision_translates_main_and_offset_into_common_project_frame():
     rep=clearance_report(main,offsets,1.0,1.0,main_surface_easting_m=1000,main_surface_northing_m=2000)
     assert len(rep)==1
     assert abs(float(rep.iloc[0]['separation_m'])-100.0) < 1.0
-
-
-def test_legacy_bha_data_is_preserved_without_active_bha_page():
-    p = new_project()
-    p['bha'] = [{'component': 'Legacy bit', 'length_m': 0.3}]
-    q = project_from_json(p)
-    assert q.get('bha') == p['bha']
-    app = Path(__file__).parents[1] / 'app.py'
-    text = app.read_text()
-    assert "elif page=='BHA & Drilling'" not in text

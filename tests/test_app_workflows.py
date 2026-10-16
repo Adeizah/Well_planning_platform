@@ -7,7 +7,7 @@ from core.project import new_project, project_from_json
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 NAV = ['Dashboard', 'Project & Reference', 'Well Architecture', 'Targets', 'Offsets', 'Survey Manager', 'Trajectory Planner', 'Geomagnetics',
        'Geodesy', 'Anti-Collision', 'Casing Design', 'Hydraulics & ECD', 'PP / FG & Mud Window', 'Torque & Drag', 'Cementing', 'Well Control',
-       'Visualization', 'QA/QC', 'Reports', 'About']
+       'BHA & Drilling', 'Visualization', 'QA/QC', 'Reports', 'About']
 MEASURED = [{'MD': 0.0, 'Inc': 0.0, 'Azi': 0.0}, {'MD': 300.0, 'Inc': 2.0, 'Azi': 10.0}, {'MD': 600.0, 'Inc': 3.0, 'Azi': 12.0}]
 
 
