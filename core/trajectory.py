@@ -4,14 +4,43 @@ import pandas as pd
 
 
 def _dogleg(inc1, azi1, inc2, azi2):
-    i1, i2 = np.radians([inc1, inc2])
-    a1, a2 = np.radians([azi1, azi2])
-    c = np.cos(i1)*np.cos(i2) + np.sin(i1)*np.sin(i2)*np.cos(a2-a1)
-    c = np.clip(c, -1.0, 1.0)
-    return np.degrees(np.arccos(c))
+    """Dogleg angle (degrees) between two survey directions.
+
+    Uses the haversine form, which stays accurate for very small doglegs where
+    the arccos form loses roughly eight digits.
+    """
+    i1, i2 = np.radians(np.asarray(inc1, dtype=float)), np.radians(np.asarray(inc2, dtype=float))
+    a1, a2 = np.radians(np.asarray(azi1, dtype=float)), np.radians(np.asarray(azi2, dtype=float))
+    h = np.sin((i2 - i1) / 2.0) ** 2 + np.sin(i1) * np.sin(i2) * np.sin((a2 - a1) / 2.0) ** 2
+    return np.degrees(2.0 * np.arcsin(np.sqrt(np.clip(h, 0.0, 1.0))))
 
 
-def minimum_curvature(df, dls_interval=30.0):
+def _ratio_factor(dog_rad):
+    """Minimum-curvature ratio factor 2/dog*tan(dog/2), safe at dog -> 0."""
+    dog = np.asarray(dog_rad, dtype=float)
+    out = np.ones_like(dog)
+    nz = np.abs(dog) > 1e-9
+    out[nz] = 2.0 / dog[nz] * np.tan(dog[nz] / 2.0)
+    small = ~nz
+    out[small] = 1.0 + dog[small] ** 2 / 12.0
+    return out
+
+
+def minimum_curvature(df, dls_interval=30.0, tie_in=None):
+    """Minimum-curvature positions for a survey (vectorised).
+
+    Parameters
+    ----------
+    df : DataFrame with MD, Inc, Azi (metres / degrees). Extra columns are kept.
+    dls_interval : length basis for the DLS column (default 30 m).
+    tie_in : optional dict with any of ``north``, ``east``, ``tvd`` giving the
+        position of the FIRST station. When omitted and the first MD is 0 the
+        tie-in is (0, 0, 0). When omitted and the first MD is > 0 the hole is
+        assumed vertical from surface to the first station (TVD = MD, N = E = 0)
+        and ``result.attrs['tie_in_assumed']`` is set so callers can flag it.
+        Previously TVD silently started at 0 at the first station, which put
+        every deeper point too shallow by the first MD.
+    """
     required = {"MD", "Inc", "Azi"}
     if not required.issubset(df.columns):
         raise ValueError("Survey requires MD, Inc and Azi columns.")
@@ -24,25 +53,86 @@ def minimum_curvature(df, dls_interval=30.0):
         raise ValueError("MD must increase strictly.")
     if not w["Inc"].between(0, 180).all():
         raise ValueError("Inclination must be between 0 and 180 degrees.")
-    n = [0.0]; e = [0.0]; tvd = [0.0]; dls = [0.0]
-    for j in range(1, len(w)):
-        md1, md2 = float(w.loc[j-1,"MD"]), float(w.loc[j,"MD"])
-        dl = md2-md1
-        i1, i2 = np.radians([w.loc[j-1,"Inc"], w.loc[j,"Inc"]])
-        a1, a2 = np.radians([w.loc[j-1,"Azi"], w.loc[j,"Azi"]])
-        dog = np.radians(_dogleg(w.loc[j-1,"Inc"], w.loc[j-1,"Azi"], w.loc[j,"Inc"], w.loc[j,"Azi"]))
-        rf = 1.0 if abs(dog) < 1e-12 else 2.0/dog*np.tan(dog/2.0)
-        dn = dl/2.0*(np.sin(i1)*np.cos(a1)+np.sin(i2)*np.cos(a2))*rf
-        de = dl/2.0*(np.sin(i1)*np.sin(a1)+np.sin(i2)*np.sin(a2))*rf
-        dz = dl/2.0*(np.cos(i1)+np.cos(i2))*rf
-        n.append(n[-1]+dn); e.append(e[-1]+de); tvd.append(tvd[-1]+dz)
-        dls.append(np.degrees(dog)/dl*dls_interval if dl > 0 else 0.0)
+    md = w["MD"].to_numpy(float)
+    inc = np.radians(w["Inc"].to_numpy(float))
+    azi = np.radians(w["Azi"].to_numpy(float))
+    ti = dict(tie_in or {})
+    assumed = False
+    if "tvd" not in ti:
+        ti["tvd"] = float(md[0]) if md[0] > 0 else 0.0
+        assumed = md[0] > 0
+    n0, e0, z0 = float(ti.get("north", 0.0)), float(ti.get("east", 0.0)), float(ti["tvd"])
+    dl = np.diff(md)
+    dog = np.radians(_dogleg(w["Inc"].to_numpy(float)[:-1], w["Azi"].to_numpy(float)[:-1],
+                             w["Inc"].to_numpy(float)[1:], w["Azi"].to_numpy(float)[1:]))
+    rf = _ratio_factor(dog)
+    dn = dl / 2.0 * (np.sin(inc[:-1]) * np.cos(azi[:-1]) + np.sin(inc[1:]) * np.cos(azi[1:])) * rf
+    de = dl / 2.0 * (np.sin(inc[:-1]) * np.sin(azi[:-1]) + np.sin(inc[1:]) * np.sin(azi[1:])) * rf
+    dz = dl / 2.0 * (np.cos(inc[:-1]) + np.cos(inc[1:])) * rf
+    north = n0 + np.concatenate(([0.0], np.cumsum(dn)))
+    east = e0 + np.concatenate(([0.0], np.cumsum(de)))
+    tvd = z0 + np.concatenate(([0.0], np.cumsum(dz)))
+    dls = np.concatenate(([0.0], np.degrees(dog) / dl * dls_interval))
     out = w.copy()
-    out["Northing"] = n; out["Easting"] = e; out["TVD"] = tvd; out["DLS"] = dls
+    out["Northing"] = north; out["Easting"] = east; out["TVD"] = tvd; out["DLS"] = dls
+    # NOTE: "VS" has always been the horizontal closure distance. It equals a true
+    # vertical section only along the closure azimuth; use vertical_section() for
+    # a section along an arbitrary azimuth.
     out["VS"] = np.hypot(out["Northing"], out["Easting"])
     out["Closure"] = out["VS"]
     out["ClosureAzi"] = (np.degrees(np.arctan2(out["Easting"], out["Northing"])) % 360.0)
+    out.attrs["tie_in_assumed"] = bool(assumed)
     return out
+
+
+def vertical_section(path, section_azimuth_deg):
+    """True vertical section (projection onto a section azimuth), same units as path."""
+    a = math.radians(float(section_azimuth_deg))
+    return (path["Northing"].to_numpy(float) * math.cos(a) + path["Easting"].to_numpy(float) * math.sin(a))
+
+
+def interpolate_path(path, md_values):
+    """Exact minimum-curvature (circular-arc) positions at arbitrary MDs.
+
+    ``path`` must contain MD, Inc, Azi, Northing, Easting, TVD. Between two
+    stations the wellbore is a circular arc, so inclination/azimuth follow a
+    spherical interpolation of the tangent and positions follow the arc. This is
+    exact for minimum-curvature surveys, unlike linear interpolation of
+    coordinates (which cuts the chord).
+    """
+    p = path.sort_values("MD").reset_index(drop=True)
+    mds = p["MD"].to_numpy(float)
+    q = np.clip(np.asarray(md_values, dtype=float), mds[0], mds[-1])
+    if len(p) == 1:
+        rep = {c: np.full(len(q), float(p[c].iloc[0])) for c in ("Inc", "Azi", "Northing", "Easting", "TVD")}
+        return pd.DataFrame({"MD": q, **rep})
+    k = np.clip(np.searchsorted(mds, q, side="right") - 1, 0, len(mds) - 2)
+    L = mds[k + 1] - mds[k]
+    f = (q - mds[k]) / L
+    i1 = np.radians(p["Inc"].to_numpy(float)[k]); i2 = np.radians(p["Inc"].to_numpy(float)[k + 1])
+    a1 = np.radians(p["Azi"].to_numpy(float)[k]); a2 = np.radians(p["Azi"].to_numpy(float)[k + 1])
+    t1 = np.stack([np.sin(i1) * np.cos(a1), np.sin(i1) * np.sin(a1), np.cos(i1)], axis=1)
+    t2 = np.stack([np.sin(i2) * np.cos(a2), np.sin(i2) * np.sin(a2), np.cos(i2)], axis=1)
+    beta = np.radians(_dogleg(np.degrees(i1), np.degrees(a1), np.degrees(i2), np.degrees(a2)))
+    sb = np.sin(beta)
+    straight = sb < 1e-9
+    w1 = np.where(straight, 1.0 - f, np.sin((1.0 - f) * beta) / np.where(straight, 1.0, sb))
+    w2 = np.where(straight, f, np.sin(f * beta) / np.where(straight, 1.0, sb))
+    tf = w1[:, None] * t1 + w2[:, None] * t2
+    tf /= np.maximum(np.linalg.norm(tf, axis=1, keepdims=True), 1e-15)
+    rf = _ratio_factor(f * beta)
+    disp = (f * L / 2.0)[:, None] * (t1 + tf) * rf[:, None]
+    base = np.stack([p["Northing"].to_numpy(float)[k], p["Easting"].to_numpy(float)[k], p["TVD"].to_numpy(float)[k]], axis=1)
+    pos = base + disp
+    inc_f = np.degrees(np.arccos(np.clip(tf[:, 2], -1.0, 1.0)))
+    azi_f = np.degrees(np.arctan2(tf[:, 1], tf[:, 0])) % 360.0
+    # Keep the original station angles exactly at stations (azimuth is undefined at inc = 0).
+    at_start = f <= 1e-12
+    inc_f = np.where(at_start, np.degrees(i1), inc_f)
+    azi_f = np.where(at_start, np.degrees(a1) % 360.0, azi_f)
+    dls = np.degrees(beta) / L * 30.0
+    return pd.DataFrame({"MD": q, "Inc": inc_f, "Azi": azi_f, "Northing": pos[:, 0],
+                         "Easting": pos[:, 1], "TVD": pos[:, 2], "DLS": dls})
 
 
 def _build_hold_candidate(kop_md, build_rate_deg_30m, hold_inc_deg, hold_azi_deg,
@@ -164,8 +254,9 @@ def truncate_trajectory_at_md(path, target_md):
     """Return a path ending exactly at target_md, interpolating a final station.
 
     Used only after independent target and constraint checks confirm a valid
-    intercept. Preserves all numeric survey columns and avoids leaving the well
-    artificially extended to the planned search-depth ceiling.
+    intercept. The final station is placed ON the minimum-curvature arc (exact
+    circular-arc interpolation), not on the chord between stations, so the
+    truncated path is geometrically identical to the original up to target_md.
     """
     if path is None or len(path) == 0 or target_md is None:
         return path.copy() if path is not None else path
@@ -173,31 +264,43 @@ def truncate_trajectory_at_md(path, target_md):
     md = float(target_md)
     if md < float(df["MD"].iloc[0]) - 1e-8 or md > float(df["MD"].iloc[-1]) + 1e-8:
         raise ValueError("Target MD lies outside the calculated trajectory.")
-    before = df[df["MD"] < md - 1e-8]
-    exact = df[np.isclose(df["MD"].to_numpy(dtype=float), md, atol=1e-8)]
-    if not exact.empty:
-        result = df[df["MD"] <= md + 1e-8].copy().reset_index(drop=True)
-        return result
-    hi_idx = int(np.searchsorted(df["MD"].to_numpy(dtype=float), md, side="right"))
+    mds = df["MD"].to_numpy(dtype=float)
+    if np.isclose(mds, md, atol=1e-8).any():
+        return df[df["MD"] <= md + 1e-8].copy().reset_index(drop=True)
+    hi_idx = int(np.searchsorted(mds, md, side="right"))
     if hi_idx <= 0:
         return df.iloc[[0]].copy().reset_index(drop=True)
     if hi_idx >= len(df):
         return df.copy()
+    before = df[df["MD"] < md - 1e-8]
     lo, hi = df.iloc[hi_idx - 1], df.iloc[hi_idx]
-    frac = (md - float(lo["MD"])) / max(float(hi["MD"]) - float(lo["MD"]), 1e-12)
+    pos_cols = {"Inc", "Azi", "Northing", "Easting", "TVD", "DLS"}
+    if {"Inc", "Azi", "Northing", "Easting", "TVD"}.issubset(df.columns):
+        exact = interpolate_path(df.iloc[[hi_idx - 1, hi_idx]], [md]).iloc[0]
+    else:
+        exact = None
     row = {}
+    frac = (md - float(lo["MD"])) / max(float(hi["MD"]) - float(lo["MD"]), 1e-12)
     for col in df.columns:
-        try:
+        if col == "MD":
+            row[col] = md
+        elif exact is not None and col in pos_cols:
+            row[col] = float(exact[col])
+        elif col == "Azi":
             a, b = float(lo[col]), float(hi[col])
-            if col == "MD": row[col] = md
-            elif col == "Azi":
-                delta = (b - a + 180.0) % 360.0 - 180.0
-                row[col] = (a + frac * delta) % 360.0
-            else: row[col] = a + frac * (b - a)
-        except (TypeError, ValueError):
-            row[col] = lo[col]
-    result = pd.concat([before, pd.DataFrame([row])], ignore_index=True)
-    return result
+            row[col] = (a + frac * ((b - a + 180.0) % 360.0 - 180.0)) % 360.0
+        else:
+            try:
+                row[col] = float(lo[col]) + frac * (float(hi[col]) - float(lo[col]))
+            except (TypeError, ValueError):
+                row[col] = lo[col]
+    if "VS" in row and exact is not None:
+        row["VS"] = float(np.hypot(row["Northing"], row["Easting"]))
+    if "Closure" in row and exact is not None:
+        row["Closure"] = float(np.hypot(row["Northing"], row["Easting"]))
+    if "ClosureAzi" in row and exact is not None:
+        row["ClosureAzi"] = float(np.degrees(np.arctan2(row["Easting"], row["Northing"])) % 360.0)
+    return pd.concat([before, pd.DataFrame([row])], ignore_index=True)
 
 
 def generate_profile_candidate(profile, kop_md, build_rate_deg_30m, hold_inc_deg,
