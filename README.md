@@ -4,7 +4,7 @@ A browser-first, project-independent drilling engineering and well-planning prac
 
 ## Purpose
 
-Well Planning Platform combines geodesy, geomagnetics, survey management, trajectory planning, target geometry, offsets, anti-collision screening, casing architecture, hydraulics/ECD, torque & drag, cementing, well control, BHA documentation, visualization and QA/QC in one project model.
+Well Planning Platform combines geodesy, geomagnetics, survey management, trajectory planning, target geometry, offsets, anti-collision screening, casing architecture, hydraulics/ECD, torque & drag, cementing, well control, visualization and QA/QC in one project model.
 
 It is designed for students, trainees, drilling engineers, directional drillers, MWD/LWD engineers, petroleum engineers, researchers and educators who want a practical environment for building complete synthetic well plans.
 
@@ -32,7 +32,6 @@ It is designed for students, trainees, drilling engineers, directional drillers,
 - Torque & drag screening
 - Cement-volume screening
 - Well-control screening
-- BHA/drilling configuration records
 - Integrated plan, vertical-section and 3D visualization with target, offset and well annotations
 - QA/QC, JSON project export and report export
 - Optional in-app Light/Dark workspace theme
@@ -124,3 +123,7 @@ The platform now treats the project CRS as the authoritative spatial frame for p
 The trajectory optimizer uses SciPy differential evolution to search the parameterization of the selected profile. It is a practice-grade candidate optimizer, not a certified directional planning engine. The current Custom profile is a configurable build-hold-drop template; arbitrary user-defined multi-section control points are not yet implemented. Azimuth is optimized as a constant planning azimuth; a full variable-azimuth/turn-rate schedule is not yet implemented. A result marked REVIEW is not a feasible design.
 
 Offset survey CSV imports require columns `MD`, `Inc`, and `Azi`, with MD in ft and inclination/azimuth in degrees. The application converts MD to internal metres and calculates positions using minimum curvature. Surface-only offsets are shown as markers and cannot support full subsurface anti-collision evaluation.
+
+### Active-scope note
+
+The BHA & Drilling page is intentionally not part of the active workflow. Older project files may still contain a `bha` field; it is preserved during import/export for backward compatibility and is not used by the active trajectory-planning workflow. The general trajectory optimizer exposes Free KOP, Fixed KOP, and KOP-window controls. This remains engineering-development software; anti-collision uncertainty is not an operationally validated ISCWSA implementation.

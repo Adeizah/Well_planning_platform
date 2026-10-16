@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-15 — Audit, correction and independent-validation pass
+
+See `GAP_ANALYSIS.md` for evidence, tests and open items.
+
+- **Fixed (safety-relevant):** anti-collision separation factor swapped North/East in the covariance projection.
+- Anti-collision: exact arc sampling, continuous closest-approach refinement, risk intervals, per-MD profile, configurable SF / hard minimum distance / radii, KB datum alignment, UI controls.
+- Fixed TVD tie-in for surveys not starting at MD 0; polygon target outline/miss distance; truncation on the arc; vertical-section helper.
+- Vectorised minimum curvature (~150x) and survey uncertainty (O(n)); numerically identical to the previous implementation.
+- New `core/validation.py` (independent validator used for every planning mode), `core/feasibility.py` (infeasibility proofs), `core/dependencies.py` (stale-plan detection), `core/visual.py` (failed-candidate display window), `core/survey_qc.py` (import QC).
+- General optimizer: multi-seed search, adaptive control points/segment lengths, offset detours, collision-buffer escalation, polish, time budget; result classes PASS / REVIEW / NO FEASIBLE CANDIDATE FOUND with proof of infeasibility where provable.
+- App: target editing, per-target tolerance/thickness, failed candidates no longer overwrite the active survey (backup kept), stale-plan banners, validation panel, trajectory-source selector, intercept / closest-approach markers.
+- Tests: 60 -> 102 (+ offline app harness). Original tests unchanged except one tautological assertion that now requires PASS.
+
 ## 2026-10-07 — Integrated engineering correction pass
 
 - Fixed WMM2025 integration to use the documented `pywmm` field getters with a compatible fallback path.
@@ -35,7 +48,7 @@
 - Added integrated offset trajectories and visualization.
 - Added casing architecture and design screening.
 - Expanded hydraulics, T&D, cement and well-control screens.
-- Added BHA/drilling configuration.
+- Earlier revisions included BHA/drilling configuration; the active BHA page has now been removed from navigation. Legacy `bha` project data is preserved for backward compatibility.
 - Added integrated visualization for plan, vertical section and 3D views.
 - Added stronger project QA/QC and report export.
 - Clarified screening versus validated engineering status throughout the product.
@@ -146,3 +159,18 @@
 - Multiple-target planning requires an optimization mode; Manual profile mode explicitly refuses to imply that a single-target manual candidate satisfies a sequence.
 - Added regression tests for malformed sequence inputs and vertical-well target sequences.
 - Validation performed: Python compilation passed; project/pressure tests passed (2); multi-target tests passed (2). Broader trajectory/optimizer tests exceeded the execution time limit when run together, so full end-to-end validation remains outstanding.
+
+## General trajectory optimizer development build
+- Added an experimental control-point trajectory optimizer with variable inclination and azimuth schedules integrated through minimum-curvature survey calculations.
+- Added ordered-target support, inclined target-plane residuals (dip/dip direction), optional target approach azimuth/inclination constraints, and optional wellbore/target-plane intersection-angle constraints.
+- Added optimization-time offset avoidance screening and independent covariance-based clearance validation; the uncertainty envelope used during search is explicitly documented as approximate and development-grade.
+- Added a configurable separation-factor threshold to the independent anti-collision screening report; the report samples the pairwise trajectory grid and separately reports geometric closest approach and minimum sampled SF locations.
+- Added target deletion confirmation and marks saved trajectories that depended on a deleted target as REVIEW.
+- Added regression tests for general optimization, missing offset survey review, target sequence metadata, inclined plane geometry and intersection-angle calculations.
+
+## 2026-10-15 — Essential workflow follow-up
+
+- Removed the BHA & Drilling page from active navigation and page routing; legacy `bha` project data remains in the schema for compatibility.
+- Added Fixed KOP and KOP-window controls to the general trajectory optimizer UI. The selected restriction is passed to the optimizer and independent validator.
+- Added explicit upper-bound KOP penalty and candidate rejection to the general optimizer.
+- Updated workflow tests and README scope notes.

@@ -62,3 +62,12 @@ Minimum regression checks:
 Automated regression tests cover profile generation and run a low-iteration optimizer smoke test for all six profiles. Passing those tests does not establish that every target/profile combination is feasible or that optimization has converged. Manual visual validation against representative easy, difficult, and unreachable targets remains required.
 
 Known limitation: the current candidate parameterization uses a constant azimuth for each trajectory. A true multi-section azimuth-turn schedule and independent turn-rate enforcement are not implemented yet; do not interpret the configured maximum turn rate as validated for a trajectory that changes azimuth by section. Custom is currently a generic build/hold/drop template, not a free-form section editor.
+
+
+## Independent validation workflow (added 2026-10-15)
+
+1. Any trajectory (optimized, manual, imported) -> `core.validation.validate_trajectory(...)`.
+2. Treat only `status == "PASS"` as acceptable; inspect `checks` for the reason behind every `REVIEW`.
+3. Save/export keeps `validation_status`, `survey_hash` and a dependency snapshot; editing a target, offset, surface/KB, constraint or uncertainty
+   parameter marks the saved plan `REVIEW` until it is regenerated.
+4. Run `pytest -q` and then `streamlit run app.py` to complete the live checks listed in `GAP_ANALYSIS.md`.

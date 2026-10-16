@@ -11,7 +11,13 @@ import streamlit as st
 from core.project import new_project, project_to_json, project_from_json, validate_project
 from core.trajectory import minimum_curvature, build_constant_build_hold, solve_build_hold_hold_inclination, generate_profile_candidate, truncate_trajectory_at_md
 from core.optimizer import optimize_trajectory, _target_residual
+from core.general_optimizer import optimize_general_trajectory
 from core.geometry import target_boundary
+from core.validation import validate_trajectory, to_jsonable
+from core.dependencies import refresh_plan_staleness, attach_snapshot
+from core.visual import display_path
+from core.survey_qc import survey_quality_report
+from core.trajectory import interpolate_path
 from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to_magnetic, magnetic_to_grid, grid_to_magnetic, reference_requirements, convert_to_project_reference
 from models.geomagnetic import wmm2025, igrf14
 from models.geodesy import crs_info, transform_coordinates, grid_convergence_deg, normal_gravity, noaa_geoid_height
@@ -58,6 +64,9 @@ button[kind="primary"] { font-weight:700; }
 if 'project' not in st.session_state:
     st.session_state.project = new_project()
 project = st.session_state.project
+# A saved plan is downgraded to REVIEW (never silently kept valid) when a target, offset,
+# surface/KB, constraint or uncertainty input it depended on has changed.
+_stale_reasons = refresh_plan_staleness(project)
 
 
 def save():
@@ -73,7 +82,7 @@ NAV = [
     ('HOME', ['Dashboard']),
     ('SETUP', ['Project & Reference', 'Well Architecture', 'Targets', 'Offsets']),
     ('DIRECTIONAL', ['Survey Manager', 'Trajectory Planner', 'Geomagnetics', 'Geodesy', 'Anti-Collision']),
-    ('DRILLING ENGINEERING', ['Casing Design', 'Hydraulics & ECD', 'PP / FG & Mud Window', 'Torque & Drag', 'Cementing', 'Well Control', 'BHA & Drilling']),
+    ('DRILLING ENGINEERING', ['Casing Design', 'Hydraulics & ECD', 'PP / FG & Mud Window', 'Torque & Drag', 'Cementing', 'Well Control']),
     ('OUTPUTS', ['Visualization', 'QA/QC', 'Reports']),
     ('SYSTEM', ['About']),
 ]
@@ -97,11 +106,10 @@ NAV_PREFIX = {
     'Torque & Drag': '14',
     'Cementing': '15',
     'Well Control': '16',
-    'BHA & Drilling': '17',
-    'Visualization': '18',
-    'QA/QC': '19',
-    'Reports': '20',
-    'About': '21',
+    'Visualization': '17',
+    'QA/QC': '18',
+    'Reports': '19',
+    'About': '20',
 }
 
 # Keep navigation stable across reruns. The engineering model remains in session state.
@@ -192,6 +200,8 @@ def page_header(title, section, description=None):
         st.caption(f"North reference: **{req['reference']}**  •  Declination: **{dec_txt}**  •  Grid convergence: not required for this primary reference")
     else:
         st.caption(f"North reference: **{req['reference']}**  •  No magnetic correction required for the primary reference")
+    if _stale_reasons and title in ('Trajectory Planner','Integrated Well Visualization','Anti-Collision Screening','Integrated QA/QC','Engineering Practice Report','Well Planning Dashboard'):
+        st.warning('Saved trajectory plan needs review — ' + ' '.join(_stale_reasons) + ' Regenerate and revalidate it before relying on it.')
 
 
 def status_badge(status):
@@ -306,6 +316,8 @@ elif page=='Survey Manager':
     sm=project['survey_metadata']; ref=project['reference_data']
     req=reference_requirements(project.get('north_reference','Grid North')); st.info(f"**Primary reference: {req['reference']}** — {req['label']}")
     a,b,c=st.columns(3); sm['azimuth_reference']=a.selectbox('Input azimuth reference',['Magnetic North','True North','Grid North'],index=['Magnetic North','True North','Grid North'].index(sm['azimuth_reference'])); tool_options=['MWD','Gyro','Wireline','Planned','Other']; sm['survey_tool']=b.selectbox('Survey tool',tool_options,index=tool_options.index(sm.get('survey_tool','MWD'))); method_options=['Minimum Curvature','Average Angle','Balanced Tangential']; sm['survey_method']=c.selectbox('Calculation method',method_options,index=method_options.index(sm.get('survey_method','Minimum Curvature')))
+    if sm.get('survey_method','Minimum Curvature')!='Minimum Curvature': st.warning(f"{sm['survey_method']} is not implemented: all positions are calculated with Minimum Curvature.")
+    st.caption('TVDSS is stored as an elevation: TVDSS = KB elevation − TVD (negative below mean sea level).')
     st.caption('Survey position uncertainty is now represented by a covariance-based development model. Configure the survey error parameters on the Anti-Collision page; a legacy scalar sigma remains in the project schema only for backward compatibility.')
     df=pd.DataFrame(project.get('surveys',[])); display_df=(df.copy() if not df.empty else pd.DataFrame([{'MD':0.,'Inc':0.,'Azi':0.}]))
     if 'MD' in display_df.columns: display_df['MD']=display_df['MD']*M_TO_FT
@@ -361,7 +373,9 @@ elif page=='Survey Manager':
     f=st.file_uploader('Import survey CSV (MD, Inc, Azi) — MD interpreted as ft',type='csv',key='survey_upload')
     if f:
         imp=pd.read_csv(f); st.dataframe(imp.head(),use_container_width=True)
-        if st.button('Replace survey with CSV'):
+        _qc_imp=survey_quality_report(imp,'ft')
+        for _q in _qc_imp: (st.error if _q['severity']=='ERROR' else st.warning if _q['severity']=='WARN' else st.info)(f"{_q['check']}: {_q['detail']}")
+        if st.button('Replace survey with CSV',disabled=any(_q['severity']=='ERROR' for _q in _qc_imp)):
             if {'MD','Inc','Azi'}.issubset(imp.columns): imp['MD']=imp['MD']*FT_TO_M; project['surveys']=imp[['MD','Inc','Azi']].to_dict('records'); save(); st.success('Imported. Calculate & store trajectory to generate positions, TVDSS and DLS.')
             else: st.error('CSV must contain MD, Inc and Azi.')
 
@@ -389,7 +403,7 @@ elif page=='Trajectory Planner':
     target_sequence=[]
     for target_idx in selected_indices:
         item=valid_targets[target_idx]
-        target_sequence.append({'name':item.get('name','Target'), 'tvd_m':float(project.get('kb_m',0))-float(item.get('tvdss_m',0)), 'north_m':float(item.get('north_m',0))-surface_n, 'east_m':float(item.get('east_m',0))-surface_e, 'geometry':{**dict(item), 'north_m':float(item.get('north_m',0))-surface_n, 'east_m':float(item.get('east_m',0))-surface_e}, 'tolerance_m':30.48})
+        target_sequence.append({**dict(item), 'name':item.get('name','Target'), 'tvd_m':float(project.get('kb_m',0))-float(item.get('tvdss_m',0)), 'north_m':float(item.get('north_m',0))-surface_n, 'east_m':float(item.get('east_m',0))-surface_e, 'geometry':{**dict(item), 'north_m':float(item.get('north_m',0))-surface_n, 'east_m':float(item.get('east_m',0))-surface_e}, 'tolerance_m':float(item.get('tolerance_m',30.48) or 30.48)})
     target_n=float(t.get('north_m',0)); target_e=float(t.get('east_m',0)); rel_n=target_n-surface_n; rel_e=target_e-surface_e
     target_tvdss=float(t.get('tvdss_m',0)); target_tvd=float(project.get('kb_m',0))-target_tvdss
     default_az=(math.degrees(math.atan2(rel_e,rel_n))%360.0) if abs(rel_n)+abs(rel_e)>1e-9 else 0.0
@@ -405,7 +419,9 @@ elif page=='Trajectory Planner':
     project['well_design']=profile
     save()
     if profile=='Custom': st.info('Custom currently uses a configurable build–hold–drop template. Optimization searches KOP, build rate, peak inclination, azimuth, drop start, drop rate and final inclination. Arbitrary user-defined multi-section control points are not yet implemented.')
-    planning_mode=st.radio('Planning mode',['Manual profile','Optimize (free KOP)','Optimize (fixed KOP)','Optimize (KOP window)'],horizontal=True,help='Manual generates from entered parameters. Free KOP searches the permitted range. Fixed KOP holds your entered KOP exactly and optimizes other parameters. KOP window searches only inside your geological/operational interval.')
+    planning_mode=st.radio('Planning mode',['Manual profile','Optimize (free KOP)','Optimize (fixed KOP)','Optimize (KOP window)','General trajectory optimizer (experimental)'],horizontal=True,help='The profile modes optimize a predefined profile family. General trajectory optimizer searches a flexible variable-inclination/azimuth path with control points and optional offset avoidance; treat results as engineering-development candidates requiring review.')
+    if planning_mode != 'General trajectory optimizer (experimental)' and any(float(x.get('dip_deg',0.0) or 0.0)>0 or x.get('approach_azimuth_enabled') or x.get('approach_inclination_enabled') or x.get('intersection_angle_enabled') for x in target_sequence):
+        st.warning('One or more selected targets have orientation or approach constraints. The legacy profile optimizer does not enforce these properties; use General trajectory optimizer (experimental) to include them in candidate generation and validation.')
     a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold=c.number_input('Peak/hold inclination (°)',1.,max(1.0,max_inc),default_hold,help='Peak inclination for the selected profile. Horizontal uses 90°; ERD uses at least 75° and is capped at 88°. Optimization searches within the permitted range.'); az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
     kop_window_min_ft, kop_window_max_ft = None, None
     if planning_mode == 'Optimize (KOP window)':
@@ -433,13 +449,69 @@ elif page=='Trajectory Planner':
     if br_ft > max_build_ft+1e-9: st.warning(f'Build rate exceeds the project maximum build-rate constraint of {max_build_ft:.2f}°/100 ft.')
     if profile not in ('Vertical',) and hold > max_inc and profile not in ('Horizontal',): st.error('Peak/hold inclination exceeds the project maximum inclination constraint.')
     if abs(az-default_az)>0.05: st.warning(f'Planning azimuth differs from the target-center azimuth by {abs(az-default_az):.2f}°. The candidate may not be target-center aligned.')
+    if planning_mode == 'General trajectory optimizer (experimental)':
+        st.warning('Experimental general optimizer. Offset avoidance uses a conservative screening envelope, followed by covariance-based clearance screening. This is not a certified operational anti-collision system.')
+        gc1,gc2,gc3=st.columns(3)
+        gc1.number_input('Minimum centreline clearance (ft)', min_value=0.0, max_value=5000.0, value=float(st.session_state.get('general_min_clearance_ft',100.0)), key='general_min_clearance_ft', help='Additional minimum geometric clearance used during route search; not a substitute for the required uncertainty-based separation-factor criterion.')
+        gc2.number_input('Required separation factor', min_value=0.1, max_value=10.0, value=float(st.session_state.get('general_min_sf',2.0)), key='general_min_sf', help='Final clearance screening threshold. Company-approved criteria and validated uncertainty models are required for operational use.')
+        gc3.number_input('Optimizer iterations', min_value=10, max_value=300, value=int(st.session_state.get('general_max_iter',60)), step=10, key='general_max_iter')
+        st.number_input('Search time budget (s)', min_value=10, max_value=600, value=int(st.session_state.get('general_time_budget',90)), step=10, key='general_time_budget', help='Upper limit on search time. If it is reached without a validated candidate the result is NO FEASIBLE CANDIDATE FOUND (a failed search, not a proof of infeasibility).')
+        general_kop_mode = st.selectbox('General optimizer KOP control', ['Free KOP', 'Fixed KOP', 'KOP window'], index=0, key='general_kop_mode', help='Constrains the first build point for the flexible optimizer. These constraints are independently checked on the generated trajectory.')
+        general_min_kop_m = general_max_kop_m = None
+        if general_kop_mode == 'Fixed KOP':
+            general_fixed_kop_ft = st.number_input('Fixed KOP MD (ft)', min_value=0.0, max_value=49213.0, value=float(kop_ft), key='general_fixed_kop_ft')
+            general_min_kop_m = general_max_kop_m = general_fixed_kop_ft * FT_TO_M
+        elif general_kop_mode == 'KOP window':
+            gk1, gk2 = st.columns(2)
+            general_min_kop_ft = gk1.number_input('General optimizer minimum KOP (ft)', min_value=0.0, max_value=49213.0, value=max(0.0, float(kop_ft)-100.0), key='general_min_kop_ft')
+            general_max_kop_ft = gk2.number_input('General optimizer maximum KOP (ft)', min_value=0.0, max_value=49213.0, value=min(49213.0, float(kop_ft)+100.0), key='general_max_kop_ft')
+            if general_min_kop_ft > general_max_kop_ft:
+                st.error('General optimizer minimum KOP must not exceed maximum KOP.')
+            general_min_kop_m, general_max_kop_m = general_min_kop_ft * FT_TO_M, general_max_kop_ft * FT_TO_M
     st.caption(f'Current design preset: **{saved_profile}**. Selected calculation profile: **{profile}**. The stored survey changes only when you generate the trajectory.')
     if st.button('Generate trajectory for selected shape',type='primary'):
         try:
             requested_peak = 0.0 if profile == 'Vertical' else (90.0 if profile == 'Horizontal' else (min(max(hold,75.0),88.0) if profile == 'ERD' else hold))
-            if requested_peak > max_inc + 1e-9:
+            if planning_mode != 'General trajectory optimizer (experimental)' and requested_peak > max_inc + 1e-9:
                 raise ValueError(f'{profile} requires a peak inclination of {requested_peak:.1f}°, above the project maximum inclination of {max_inc:.1f}°. Update the design constraint first if this profile is intended.')
-            if planning_mode != 'Manual profile':
+            if planning_mode == 'General trajectory optimizer (experimental)':
+                general_min_kop_m = general_max_kop_m = None
+                _gkm = st.session_state.get('general_kop_mode', 'Free KOP')
+                if _gkm == 'Fixed KOP':
+                    _gk = float(st.session_state.get('general_fixed_kop_ft', kop_ft)) * FT_TO_M
+                    general_min_kop_m = general_max_kop_m = _gk
+                elif _gkm == 'KOP window':
+                    general_min_kop_m = float(st.session_state.get('general_min_kop_ft', max(0.0, kop_ft-100.0))) * FT_TO_M
+                    general_max_kop_m = float(st.session_state.get('general_max_kop_ft', kop_ft+100.0)) * FT_TO_M
+                    if general_min_kop_m > general_max_kop_m:
+                        raise ValueError('General optimizer minimum KOP must not exceed maximum KOP.')
+                collision_col1, collision_col2, collision_col3 = st.columns(3)
+                # Values are read from stable Streamlit session keys on the next rerun;
+                # defaults are conservative screening inputs, not operational standards.
+                min_clearance_ft = float(st.session_state.get('general_min_clearance_ft', 100.0))
+                min_sf = float(st.session_state.get('general_min_sf', 2.0))
+                max_iter_general = int(st.session_state.get('general_max_iter', 60))
+                sigma_params = dict(project.get('survey_metadata', {}).get('survey_error_parameters', {}))
+                out,meta=optimize_general_trajectory(
+                    targets=target_sequence,
+                    max_md_m=provisional_md_limit,
+                    max_inclination_deg=max_inc,
+                    max_dls_deg_30m=float(project.get('design_constraints',{}).get('max_dls_deg_30m',3.0) or 3.0),
+                    max_build_rate_deg_30m=float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',3.0) or 3.0),
+                    max_turn_rate_deg_30m=float(project.get('design_constraints',{}).get('max_turn_rate_deg_30m',3.0) or 3.0),
+                    station_interval_m=30.0, maxiter=max_iter_general,
+                    surface_easting_m=surface_e, surface_northing_m=surface_n,
+                    offsets=project.get('offsets', []),
+                    min_centerline_separation_m=min_clearance_ft*FT_TO_M,
+                    required_separation_factor=min_sf,
+                    uncertainty_parameters=sigma_params,
+                    target_tolerance_m=30.48, control_points=6,
+                    kb_m=float(project.get('kb_m',0) or 0), time_budget_s=float(st.session_state.get('general_time_budget',90)),
+                    min_kop_md_m=general_min_kop_m, max_kop_md_m=general_max_kop_m,
+                )
+                meta=dict(meta); meta['planning_mode']=planning_mode
+                meta['profile']='General control-point trajectory'
+            elif planning_mode != 'Manual profile':
                 target_geometry=dict(t)
                 target_geometry['north_m']=rel_n
                 target_geometry['east_m']=rel_e
@@ -452,7 +524,7 @@ elif page=='Trajectory Planner':
                     max_build_rate_deg_30m=float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',3.0) or 3.0),
                     max_turn_rate_deg_30m=float(project.get('design_constraints',{}).get('max_turn_rate_deg_30m',3.0) or 3.0),
                     drop_rate_initial_deg_30m=dls_100ft_to_30m(dr_ft), final_inc_initial_deg=final_inc,
-                    target_geometry=target_geometry, point_tolerance_m=30.48,
+                    target_geometry=target_geometry, point_tolerance_m=float(t.get('tolerance_m',30.48) or 30.48),
                     station_interval_m=60.0, max_md_m=provisional_md_limit,
                     kop_mode=('fixed' if planning_mode == 'Optimize (fixed KOP)' else 'window' if planning_mode == 'Optimize (KOP window)' else 'free'),
                     kop_window_min_m=(kop_window_min_ft*FT_TO_M if kop_window_min_ft is not None else None),
@@ -480,17 +552,52 @@ elif page=='Trajectory Planner':
                     meta['final_inclination_deg']=float(out['Inc'].iloc[-1])
                     meta['final_md_is_target_intercept']=True
                 meta=dict(meta); meta['planning_mode']='Manual profile'
+            # ---- Independent acceptance for EVERY planning mode --------------------------------------
+            # A generator's or optimizer's own verdict never decides validity. The candidate is rebuilt
+            # from MD/Inc/Azi and re-checked (constraints between stations, ordered target interception,
+            # termination at the final target, offset clearance) before it can be PASS.
+            _dc=project.get('design_constraints',{})
+            _req_sf=float(st.session_state.get('general_min_sf', project.get('anti_collision_criteria',{}).get('required_sf',2.0)))
+            _val=validate_trajectory(out[['MD','Inc','Azi']], targets=target_sequence,
+                constraints={'max_inclination_deg':max_inc,'max_dls_deg_30m':float(_dc.get('max_dls_deg_30m',3.0) or 3.0),
+                             'max_build_rate_deg_30m':float(_dc.get('max_build_rate_deg_30m',3.0) or 3.0),
+                             'max_turn_rate_deg_30m':float(_dc.get('max_turn_rate_deg_30m',3.0) or 3.0),
+                             **({'min_kop_md_m': general_min_kop_m, 'max_kop_md_m': general_max_kop_m} if planning_mode == 'General trajectory optimizer (experimental)' and general_min_kop_m is not None else {})},
+                offsets=project.get('offsets',[]), surface_easting_m=surface_e, surface_northing_m=surface_n,
+                kb_m=float(project.get('kb_m',0) or 0), survey_error_model=dict(project.get('survey_metadata',{}).get('survey_error_parameters',{})),
+                required_separation_factor=_req_sf, default_target_tolerance_m=30.48)
+            meta=dict(meta)
+            meta['validation_status']=_val['status']; meta['validation_checks']=to_jsonable(_val['checks']); meta['survey_hash']=_val['survey_hash']
+            meta['validator_version']=_val['validator_version']
+            if _val['status']!='PASS':
+                meta['status']='REVIEW'; meta['final_md_is_target_intercept']=False
+                if meta.get('optimization_status')=='FEASIBLE': meta['optimization_status']='REVIEW'
+                meta['constraint_violations']=sorted(set(meta.get('constraint_violations',[]))|set(_val['violations']))
+                if meta.get('display_clip_md_m') is None:
+                    _bad=next((r for r in _val['target_results'] if not (r.get('within_tolerance') and r.get('in_order'))), (_val['target_results'][-1] if _val['target_results'] else None))
+                    if _bad and _bad.get('intercept_md_m') is not None and math.isfinite(float(_bad['intercept_md_m'])): meta['display_clip_md_m']=float(_bad['intercept_md_m'])+30.48
+            meta['result_class']='PASS' if meta['status']=='PASS' else meta.get('result_class') or ('REVIEW' if meta.get('optimization_status') not in ('NO_FEASIBLE_CANDIDATE_FOUND',) else 'NO FEASIBLE CANDIDATE FOUND')
             # Preserve a dedicated planned candidate as well as the legacy active survey.
             # Survey Manager may later replace project['surveys'] with imported/measured data;
             # returning here must still restore the saved planner candidate.
             records=out.to_dict('records')
             project['planned_surveys']=records
-            project['surveys']=records
+            _prev_traj_meta=project.get('trajectory_metadata'); _prev_surveys=project.get('surveys'); _prev_src=(_prev_traj_meta or {}).get('survey_source')
+            if meta.get('status')=='PASS':
+                # Only a validated plan becomes the active survey. Measured/imported survey data is backed up, never silently lost.
+                if _prev_surveys and len(_prev_surveys)>1 and _prev_src!='planned':
+                    project['survey_backup']={'surveys':_prev_surveys,'trajectory_metadata':_prev_traj_meta,'saved_utc':datetime.utcnow().isoformat()+'Z','reason':'Replaced by a validated planner trajectory.'}
+                project['surveys']=records
             project['well_design']=profile
-            project['trajectory_metadata']={'planner':'Profile-aware multi-parameter optimizer' if planning_mode != 'Manual profile' else 'Piecewise profile candidate','planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z','survey_source':'planned'}
+            project['trajectory_metadata']={'planner':meta.get('planner', 'Profile-aware multi-parameter optimizer' if planning_mode != 'Manual profile' else 'Piecewise profile candidate'),'planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z','survey_source':'planned'}
             project['planned_trajectory_metadata']=dict(project['trajectory_metadata'])
+            attach_snapshot(project, project['planned_trajectory_metadata'], [x['name'] for x in target_sequence])
+            if meta.get('status')=='PASS': project['trajectory_metadata']=dict(project['planned_trajectory_metadata'])
+            elif _prev_traj_meta is None: project.pop('trajectory_metadata',None)
+            else: project['trajectory_metadata']=_prev_traj_meta
             save()
-            st.success('Trajectory candidate saved. You can leave this page and return without recalculating it.')
+            if meta.get('status')=='PASS': st.success('Validated trajectory saved and made the active survey. You can leave this page and return without recalculating it.')
+            else: st.warning('Candidate saved as REVIEW for inspection only. It was NOT written to the active survey, so Survey Manager data and downstream modules are unchanged.')
         except Exception as ex:
             st.error(str(ex))
 
@@ -507,6 +614,14 @@ elif page=='Trajectory Planner':
         result_line=f"Profile: {saved_profile} • status {meta.get('status','REVIEW')} • lateral error {float(meta.get('lateral_error_m',meta.get('target_lateral_error_m',float('nan'))))*M_TO_FT:.1f} ft • TVD error {float(meta.get('tvd_error_m',meta.get('target_vertical_error_m',float('nan'))))*M_TO_FT:.1f} ft • final inclination {float(meta.get('final_inclination_deg',0.0)):.2f}°"
         if meta.get('status')=='PASS': st.success(result_line)
         else: st.warning(result_line + ' • Target/profile feasibility needs review.')
+        for _sr in saved_meta_bundle.get('stale_reasons',[]): st.warning(f'Dependency changed after planning: {_sr}')
+        _proof=meta.get('proof_of_infeasibility')
+        if _proof: st.error('Proven infeasible (analytic bound, not a search failure): ' + ' '.join(_proof.get('reasons',[])))
+        elif meta.get('optimization_status')=='NO_FEASIBLE_CANDIDATE_FOUND': st.info('NO FEASIBLE CANDIDATE FOUND means this search did not find a valid trajectory — it does not prove that none exists.')
+        if meta.get('validation_checks'):
+            with st.expander(f"Independent validation: {meta.get('validation_status','—')}  •  result class: {meta.get('result_class',meta.get('status'))}", expanded=meta.get('status')!='PASS'):
+                st.dataframe(pd.DataFrame(meta['validation_checks']).astype(str),use_container_width=True,hide_index=True)
+                st.caption('Every candidate — optimized or manual — is rebuilt from MD/Inc/Azi and re-checked before it can be PASS. PASS means the checks implemented here passed; it is not operational certification.')
         if meta.get('target_intercept_md_m') is not None:
             st.caption(f"Best target approach: {float(meta['target_intercept_md_m'])*M_TO_FT:,.1f} ft MD • target miss beyond tolerance: {float(meta.get('target_miss_distance_m',max(0.0,float(meta.get('lateral_error_m',0))-30.48)))*M_TO_FT:,.1f} ft")
         if meta.get('target_sequence_results'):
@@ -517,10 +632,21 @@ elif page=='Trajectory Planner':
                 if col in seq_display: seq_display[col.replace('_m','_ft')]=seq_display[col]*M_TO_FT
             st.dataframe(seq_display.drop(columns=[c for c in ['intercept_md_m','lateral_error_m','vertical_error_m','miss_distance_m'] if c in seq_display]),use_container_width=True,hide_index=True)
             st.caption('All required targets must be intercepted in order. The final required target defines the target-terminated TD when the complete trajectory is feasible.')
-        if saved_mode=='Optimize selected profile to target':
+        if saved_mode in ('Optimize selected profile to target', 'Optimize (free KOP)', 'Optimize (fixed KOP)', 'Optimize (KOP window)', 'General trajectory optimizer (experimental)'):
             st.metric('Optimization outcome',meta.get('optimization_status','REVIEW'))
             st.caption(f"Objective score: {float(meta.get('objective_m',float('nan'))):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {float(meta.get('max_dls_deg_30m',float('nan'))):.2f}°/30 m")
             if meta.get('optimization_status')!='FEASIBLE': st.warning('No candidate met all current target and trajectory constraints. The best candidate is shown for review; constraints have not been relaxed.')
+            if saved_mode == 'General trajectory optimizer (experimental)':
+                st.caption(f"Optimizer: {meta.get('optimizer','—')} • Iterations: {meta.get('optimizer_iterations','—')} • Message: {meta.get('optimizer_message','—')}")
+                if meta.get('constraint_violations'):
+                    st.error('Constraint checks requiring review: ' + ', '.join(meta.get('constraint_violations', [])))
+                if meta.get('collision_validation'):
+                    st.markdown('#### Offset-well clearance validation')
+                    collision_view=pd.DataFrame(meta['collision_validation'])
+                    for cc in ['main_md_m','offset_md_m','separation_m','horizontal_separation_m','vertical_separation_m','directional_uncertainty_m','minimum_sf_separation_m','minimum_sf_directional_uncertainty_m','minimum_sf_main_md_m','minimum_sf_offset_md_m']:
+                        if cc in collision_view: collision_view[cc.replace('_m','_ft')]=collision_view[cc]*M_TO_FT
+                    st.dataframe(collision_view,use_container_width=True,hide_index=True)
+                    st.caption('Clearance is independently screened with the configured covariance-based development model. Any WARNING, ALERT, REVIEW or NOT CHECKED result prevents an overall PASS.')
         m1,m2,m3,m4=st.columns(4)
         m1.metric('Build end / EOB',f"{float(meta.get('build_end_md_m',0))*M_TO_FT:,.0f} ft")
         m2.metric('Build length',f"{float(meta.get('build_length_m',0))*M_TO_FT:,.0f} ft")
@@ -565,21 +691,52 @@ elif page=='Targets':
     else:
         tvd=c.number_input('Target TVD (ft)',0.,50000.,12000.); tvdss=(float(project.get('kb_m',0))-tvd*FT_TO_M)*M_TO_FT
     t={'name':name,'type':typ,'north_m':n*FT_TO_M,'east_m':e*FT_TO_M,'tvdss_m':tvdss*FT_TO_M}
+    with st.expander('Target tolerance and thickness', expanded=False):
+        ta,tb,tc=st.columns(3)
+        t['tolerance_m']=ta.number_input('Lateral tolerance (ft)',0.0,5000.0,100.0,key='target_tol_ft',help='Point targets: acceptance radius. All targets: default vertical band when no vertical tolerance is given.')*FT_TO_M
+        t['vertical_tolerance_m']=tb.number_input('Vertical tolerance (ft)',0.0,5000.0,100.0,key='target_vtol_ft')*FT_TO_M
+        t['thickness_m']=tc.number_input('Target thickness (ft, 0 = not used)',0.0,5000.0,0.0,key='target_thick_ft',help='True vertical thickness of the target layer; the vertical acceptance band is at least half of it.')*FT_TO_M
+    with st.expander('Advanced target orientation and approach constraints', expanded=False):
+        t['inclined_plane_enabled']=st.checkbox('Define an inclined geological target plane', key='target_plane_enabled')
+        if t['inclined_plane_enabled']:
+            oa,ob=st.columns(2)
+            t['dip_deg']=oa.number_input('Target dip (°)',0.0,89.0,25.0,key='target_dip_deg')
+            t['dip_direction_deg']=ob.number_input('Dip direction (° from project north)',0.0,360.0,135.0,key='target_dip_direction')
+        else:
+            t['dip_deg']=0.0; t['dip_direction_deg']=0.0
+        t['approach_azimuth_enabled']=st.checkbox('Constrain wellbore azimuth at target',key='target_approach_az_enabled')
+        if t['approach_azimuth_enabled']:
+            oa,ob=st.columns(2)
+            t['approach_azimuth_deg']=oa.number_input('Required approach azimuth (° Grid)',0.0,360.0,0.0,key='target_approach_az')
+            t['approach_azimuth_tolerance_deg']=ob.number_input('Azimuth tolerance (°)',0.1,90.0,10.0,key='target_approach_az_tol')
+        t['approach_inclination_enabled']=st.checkbox('Constrain wellbore inclination at target',key='target_approach_inc_enabled')
+        if t['approach_inclination_enabled']:
+            oa,ob=st.columns(2)
+            t['approach_inclination_deg']=oa.number_input('Required approach inclination (°)',0.0,180.0,85.0,key='target_approach_inc')
+            t['approach_inclination_tolerance_deg']=ob.number_input('Inclination tolerance (°)',0.1,90.0,5.0,key='target_approach_inc_tol')
+        t['intersection_angle_enabled']=st.checkbox('Constrain angle between wellbore and target plane',key='target_intersection_angle_enabled')
+        if t['intersection_angle_enabled']:
+            oa,ob=st.columns(2)
+            t['min_intersection_angle_deg']=oa.number_input('Minimum plane-intersection angle (°)',0.0,90.0,45.0,key='target_min_intersection_angle')
+            t['max_intersection_angle_deg']=ob.number_input('Maximum plane-intersection angle (°)',0.0,90.0,90.0,key='target_max_intersection_angle')
+            if t['min_intersection_angle_deg'] > t['max_intersection_angle_deg']:
+                st.error('Minimum plane-intersection angle must not exceed maximum angle.')
     if typ=='Circular': t['radius_m']=st.number_input('Radius (ft)',.1,10000.,50.)*FT_TO_M
     elif typ=='Elliptical':
         a,b,c=st.columns(3); t['semi_major_m']=a.number_input('Semi-major axis (ft)',.1,10000.,131.); t['semi_major_m']*=FT_TO_M; t['semi_minor_m']=b.number_input('Semi-minor axis (ft)',.1,10000.,66.)*FT_TO_M; t['orientation_deg']=c.number_input('Orientation from North (°)',-360.,360.,45.)
     elif typ=='Rectangular':
-        a,b=st.columns(2); t['length_m']=a.number_input('North-South length (ft)',.1,10000.,200.)*FT_TO_M; t['width_m']=b.number_input('East-West width (ft)',.1,10000.,100.)*FT_TO_M
+        a,b,c=st.columns(3); t['length_m']=a.number_input('Length along orientation (ft)',.1,10000.,200.)*FT_TO_M; t['width_m']=b.number_input('Width across orientation (ft)',.1,10000.,100.)*FT_TO_M; t['orientation_deg']=c.number_input('Length-axis azimuth from North (°)',-360.,360.,0.,key='rect_orientation')
     elif typ=='Corridor':
         a,b,c=st.columns(3); t['half_length_m']=a.number_input('Half-length (ft)',.1,20000.,1000.)*FT_TO_M; t['half_width_m']=b.number_input('Half-width (ft)',.1,5000.,50.)*FT_TO_M; t['azimuth_deg']=c.number_input('Corridor azimuth (°)',0.,360.,0.)
     elif typ=='Polygon':
-        txt=st.text_area('Polygon points as North,East per line','0,0\n0,100\n100,100\n100,0'); pts=[]
+        txt=st.text_area('Polygon vertices as North,East OFFSETS from the target centre, in metres (one per line)','-50,-50\n-50,50\n50,50\n50,-50'); pts=[]
         for line in txt.splitlines():
             try: nn,ee=[float(x.strip()) for x in line.split(',')[:2]]; pts.append([nn,ee])
             except Exception: pass
         t['points']=pts
     if st.button('Add target',type='primary'):
         if not name.strip(): st.error('Target name is required.')
+        elif t.get('intersection_angle_enabled') and float(t.get('min_intersection_angle_deg',0)) > float(t.get('max_intersection_angle_deg',90)): st.error('Minimum plane-intersection angle must not exceed maximum angle.')
         elif project.get('crs','').upper()=='EPSG:4326': st.error('Select a projected project CRS before creating an absolute-coordinate target.')
         else: project['targets'].append(t); save(); st.success('Target added.')
     if project['targets']:
@@ -587,6 +744,62 @@ elif page=='Targets':
         for col in ['north_m','east_m','tvdss_m','radius_m','semi_major_m','semi_minor_m','length_m','width_m','half_length_m','half_width_m']:
             if col in td.columns: td[col.replace('_m','_ft')]=td[col]*M_TO_FT; td.drop(columns=[col],inplace=True)
         st.dataframe(td,use_container_width=True,hide_index=True)
+        st.markdown('#### Delete a target')
+        delete_idx=st.selectbox('Select target to delete',range(len(project['targets'])),format_func=lambda i: project['targets'][i].get('name',f'Target {i+1}'),key='delete_target_index')
+        confirm_delete=st.checkbox('I understand that deleting this target may invalidate a saved trajectory.',key='confirm_delete_target')
+        if st.button('Delete selected target',disabled=not confirm_delete):
+            deleted_name=str(project['targets'][delete_idx].get('name',f'Target {delete_idx+1}'))
+            del project['targets'][delete_idx]
+            for bundle_key in ('planned_trajectory_metadata','trajectory_metadata'):
+                bundle=project.get(bundle_key) or {}
+                result=bundle.get('planner_result',{})
+                seq=result.get('target_sequence_results',[])
+                if any(str(x.get('name'))==deleted_name for x in seq):
+                    result['status']='REVIEW'; result['optimization_status']='REVIEW'
+                    result.setdefault('constraint_violations',[]).append('target_deleted_after_planning')
+                    bundle['stale_reason']=f'Target {deleted_name} was deleted after this trajectory was generated; regenerate and revalidate the plan.'
+                    project[bundle_key]=bundle
+            save(); st.warning(f'Target {deleted_name} deleted. Any saved trajectory that depended on it is marked REVIEW; regenerate it before relying on the result.'); st.rerun()
+
+    if project['targets']:
+        st.markdown('#### Edit a target')
+        st.caption('Editing a target that a saved trajectory depends on automatically marks that trajectory REVIEW until it is regenerated and revalidated.')
+        edit_idx=st.selectbox('Select target to edit',range(len(project['targets'])),format_func=lambda i: project['targets'][i].get('name',f'Target {i+1}'),key='edit_target_index')
+        et=dict(project['targets'][edit_idx]); typ_e=str(et.get('type','Point')); k=f'{edit_idx}'
+        st.caption(f'Geometry type: **{typ_e}** — to change the geometry type, create a new target.')
+        ea,eb,ec=st.columns(3)
+        et['name']=ea.text_input('Name',str(et.get('name','')),key=f'edit_name_{k}')
+        en=eb.number_input('Center Northing (ft)',-10000000.,10000000.,float(et.get('north_m',0))*M_TO_FT,key=f'edit_n_{k}')
+        ee=ec.number_input('Center Easting (ft)',-10000000.,10000000.,float(et.get('east_m',0))*M_TO_FT,key=f'edit_e_{k}')
+        eta,etb,etc=st.columns(3)
+        etv=eta.number_input('Target TVDSS (ft)',-50000.,50000.,float(et.get('tvdss_m',0))*M_TO_FT,key=f'edit_tvdss_{k}')
+        etol=etb.number_input('Lateral tolerance (ft)',0.0,5000.0,float(et.get('tolerance_m',30.48))*M_TO_FT,key=f'edit_tol_{k}')
+        evt=etc.number_input('Vertical tolerance (ft)',0.0,5000.0,float(et.get('vertical_tolerance_m',et.get('tolerance_m',30.48)))*M_TO_FT,key=f'edit_vtol_{k}')
+        eda,edb,edc=st.columns(3)
+        eth=eda.number_input('Thickness (ft, 0 = none)',0.0,5000.0,float(et.get('thickness_m',0.0))*M_TO_FT,key=f'edit_thick_{k}')
+        edip=edb.number_input('Dip (°)',0.0,89.0,float(et.get('dip_deg',0.0) or 0.0),key=f'edit_dip_{k}')
+        eddir=edc.number_input('Dip direction (° from project north)',0.0,360.0,float(et.get('dip_direction_deg',0.0) or 0.0),key=f'edit_dipdir_{k}')
+        if typ_e=='Circular': et['radius_m']=st.number_input('Radius (ft)',.1,10000.,max(.1,float(et.get('radius_m',15))*M_TO_FT),key=f'edit_r_{k}')*FT_TO_M
+        elif typ_e=='Elliptical':
+            xa,xb,xc=st.columns(3); et['semi_major_m']=xa.number_input('Semi-major (ft)',.1,10000.,max(.1,float(et.get('semi_major_m',40))*M_TO_FT),key=f'edit_a_{k}')*FT_TO_M; et['semi_minor_m']=xb.number_input('Semi-minor (ft)',.1,10000.,max(.1,float(et.get('semi_minor_m',20))*M_TO_FT),key=f'edit_b_{k}')*FT_TO_M; et['orientation_deg']=xc.number_input('Orientation from North (°)',-360.,360.,float(et.get('orientation_deg',0)),key=f'edit_o_{k}')
+        elif typ_e=='Rectangular':
+            xa,xb,xc=st.columns(3); et['length_m']=xa.number_input('Length (ft)',.1,10000.,max(.1,float(et.get('length_m',60))*M_TO_FT),key=f'edit_l_{k}')*FT_TO_M; et['width_m']=xb.number_input('Width (ft)',.1,10000.,max(.1,float(et.get('width_m',30))*M_TO_FT),key=f'edit_w_{k}')*FT_TO_M; et['orientation_deg']=xc.number_input('Length-axis azimuth (°)',-360.,360.,float(et.get('orientation_deg',0) or 0),key=f'edit_ro_{k}')
+        elif typ_e=='Corridor':
+            xa,xb,xc=st.columns(3); et['half_length_m']=xa.number_input('Half-length (ft)',.1,20000.,max(.1,float(et.get('half_length_m',300))*M_TO_FT),key=f'edit_hl_{k}')*FT_TO_M; et['half_width_m']=xb.number_input('Half-width (ft)',.1,5000.,max(.1,float(et.get('half_width_m',15))*M_TO_FT),key=f'edit_hw_{k}')*FT_TO_M; et['azimuth_deg']=xc.number_input('Corridor azimuth (°)',0.,360.,float(et.get('azimuth_deg',0)),key=f'edit_ca_{k}')
+        elif typ_e=='Polygon':
+            txt_e=st.text_area('Polygon vertices as North,East offsets from the centre (metres, one per line)','\n'.join(f'{p[0]},{p[1]}' for p in et.get('points',[])),key=f'edit_poly_{k}'); pts_e=[]
+            for line in txt_e.splitlines():
+                try: nn,ee2=[float(x.strip()) for x in line.split(',')[:2]]; pts_e.append([nn,ee2])
+                except Exception: pass
+            et['points']=pts_e
+        if st.button('Save changes to target',type='primary',key=f'edit_save_{k}'):
+            other_names=[str(x.get('name')) for j,x in enumerate(project['targets']) if j!=edit_idx]
+            if not str(et['name']).strip(): st.error('Target name is required.')
+            elif str(et['name']) in other_names: st.error('Another target already uses this name.')
+            elif typ_e=='Polygon' and len(et.get('points',[]))<3: st.error('A polygon needs at least three valid vertices.')
+            else:
+                et.update({'north_m':en*FT_TO_M,'east_m':ee*FT_TO_M,'tvdss_m':etv*FT_TO_M,'tolerance_m':etol*FT_TO_M,'vertical_tolerance_m':evt*FT_TO_M,'thickness_m':eth*FT_TO_M,'dip_deg':edip,'dip_direction_deg':eddir,'inclined_plane_enabled':bool(edip>0)})
+                project['targets'][edit_idx]=et; save(); st.success('Target updated. Any saved trajectory that depends on it is now marked REVIEW until regenerated.'); st.rerun()
 
 # Offsets
 elif page=='Offsets':
@@ -607,6 +820,9 @@ elif page=='Offsets':
             main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0)); off_n=float(off.get('surface_northing_m',main_n)); off_e=float(off.get('surface_easting_m',main_e))
             st.write(f"**Surface location:** {float(off.get('latitude',float('nan'))):.6f}°, {float(off.get('longitude',float('nan'))):.6f}°")
             st.write(f"**Project CRS:** {off.get('crs',project.get('crs'))}  •  **Relative to WN-01:** Northing {((off_n-main_n)*M_TO_FT):.2f} ft, Easting {((off_e-main_e)*M_TO_FT):.2f} ft")
+            _kb_default=float(off.get('kb_m',project.get('kb_m',0)) or 0)*M_TO_FT
+            _kb_in=st.number_input('Offset KB elevation (ft above MSL)',-1000.,5000.,_kb_default,key=f'off_kb_{i}',help='TVD is measured from each well’s own KB. Anti-collision shifts offset TVD to the main-well datum when both KB elevations are known; if blank/unchanged the two wells are assumed to share a datum.')
+            if abs(_kb_in-_kb_default)>1e-9: off['kb_m']=_kb_in*FT_TO_M; save()
             st.caption(f"Trajectory status: {'Subsurface survey available' if len(off.get('surveys', [])) > 1 else 'Surface location only — add/import survey stations to display the well path'}")
             template_csv=pd.DataFrame([{'MD':0.0,'Inc':0.0,'Azi':0.0},{'MD':1000.0,'Inc':10.0,'Azi':float(off.get('surveys',[{'Azi':0}])[-1].get('Azi',0))}]).to_csv(index=False).encode('utf-8')
             st.download_button('Download offset survey CSV template',template_csv,file_name=f"{off.get('name','offset').replace(' ','_')}_survey_template.csv",mime='text/csv',key=f'offset_template_{i}')
@@ -614,8 +830,12 @@ elif page=='Offsets':
             if off_upload is not None:
                 try:
                     imp_off=pd.read_csv(off_upload)
+                    qc_off=survey_quality_report(imp_off,'ft')
+                    for _q in qc_off:
+                        (st.error if _q['severity']=='ERROR' else st.warning if _q['severity']=='WARN' else st.info)(f"{_q['check']}: {_q['detail']}")
                     if not {'MD','Inc','Azi'}.issubset(imp_off.columns):
                         st.error('Offset CSV must contain MD, Inc and Azi columns. MD must be in ft; inclination and azimuth in degrees.')
+                    elif any(_q['severity']=='ERROR' for _q in qc_off): st.error('Fix the survey errors above before importing.')
                     elif st.button(f'Import survey for {off.get("name", "offset")}', key=f'import_offset_{i}'):
                         raw_off=imp_off[['MD','Inc','Azi']].copy(); raw_off['MD']=pd.to_numeric(raw_off['MD'],errors='raise')*FT_TO_M
                         calc_off=minimum_curvature(raw_off, dls_interval=30.0)
@@ -756,6 +976,13 @@ elif page=='Anti-Collision':
         st.warning('Surface position σ is 0 ft. If the closest approach occurs at MD = 0, propagated relative uncertainty will be zero and the result must remain REVIEW. Enter a non-zero value only when justified by the wellhead positioning uncertainty.')
     params.update({'sigma_md_ft':sigma_md_ft,'sigma_inc_deg':sigma_inc_deg,'sigma_azi_deg':sigma_azi_deg,'sigma_inc_systematic_deg':sigma_inc_sys,'sigma_azi_systematic_deg':sigma_azi_sys,'sigma_surface_ft':sigma_surface_ft})
     st.caption('The model combines independent station errors with correlated systematic inclination/azimuth biases and a surface-position covariance. It produces stationwise 3D covariance/uncertainty ellipses, but remains an engineering-development model rather than an ISCWSA error model.')
+    st.markdown('### Separation criteria')
+    _crit=project.setdefault('anti_collision_criteria',{'required_sf':2.0,'min_separation_m':None,'radius_m':0.0})
+    ca,cb,cc=st.columns(3)
+    req_sf=ca.number_input('Required separation factor',0.1,10.0,float(_crit.get('required_sf',2.0)),step=0.1,key='ac_required_sf',help='Configurable screening threshold, not an industry or company rule. SF here = centre-to-centre distance / 1σ relative uncertainty along the line joining the wells.')
+    min_ctc_ft=cb.number_input('Hard minimum centre-to-centre distance (ft, 0 = none)',0.0,5000.0,float(_crit.get('min_separation_m') or 0.0)*M_TO_FT,key='ac_min_ctc_ft')
+    radius_in=cc.number_input('Hole/casing radius per well (in, 0 = ignore)',0.0,40.0,float(_crit.get('radius_m') or 0.0)/0.0254,key='ac_radius_in')
+    _crit.update({'required_sf':req_sf,'min_separation_m':(min_ctc_ft*FT_TO_M if min_ctc_ft>0 else None),'radius_m':radius_in*0.0254})
     st.markdown('### Screening readiness')
     checks=[
         {'Item':'Main trajectory','Status':'PASS' if valid_main else 'FAIL','Detail':f'{len(main)} stored stations' if valid_main else 'Need at least two valid survey stations.'},
@@ -773,14 +1000,22 @@ elif page=='Anti-Collision':
                 rep=clearance_report(main,offsets,
                     survey_error_model={'sigma_md_ft':sigma_md_ft,'sigma_inc_deg':sigma_inc_deg,'sigma_azi_deg':sigma_azi_deg,'sigma_inc_systematic_deg':sigma_inc_sys,'sigma_azi_systematic_deg':sigma_azi_sys,'sigma_surface_ft':sigma_surface_ft},
                     main_surface_easting_m=float(project.get('surface_easting_m',0.0) or 0.0),
-                    main_surface_northing_m=float(project.get('surface_northing_m',0.0) or 0.0))
+                    main_surface_northing_m=float(project.get('surface_northing_m',0.0) or 0.0),
+                    required_separation_factor=req_sf, main_kb_m=float(project.get('kb_m',0) or 0),
+                    criteria={'min_separation_m':_crit.get('min_separation_m'),'main_radius_m':_crit.get('radius_m') or 0.0,'offset_radius_m':_crit.get('radius_m') or 0.0})
+                project['anticollision_last']=to_jsonable(rep[['offset','main_md_m','offset_md_m','separation_m','separation_factor','status']]) if not rep.empty else []
                 if rep.empty: st.warning('No valid offset comparisons were produced. Check offset survey structure and project coordinates.')
                 else:
                     disp=rep.copy()
-                    for col in ['main_md_m','offset_md_m','separation_m','horizontal_separation_m','vertical_separation_m','directional_uncertainty_m']:
+                    _risk_rows=[{'Offset':r['offset'],'Main MD from (ft)':iv['main_md_start_m']*M_TO_FT,'Main MD to (ft)':iv['main_md_end_m']*M_TO_FT,'Minimum SF':iv['min_sf'],'Main MD at min (ft)':iv['main_md_at_min_m']*M_TO_FT,'Offset MD at min (ft)':iv['offset_md_at_min_m']*M_TO_FT} for _,r in rep.iterrows() for iv in (r.get('risk_intervals') or [])]
+                    disp=disp.drop(columns=[c for c in ('risk_intervals','required_separation_factor') if c in disp.columns])
+                    for col in ['main_md_m','offset_md_m','separation_m','horizontal_separation_m','vertical_separation_m','directional_uncertainty_m','minimum_sf_separation_m','minimum_sf_directional_uncertainty_m','minimum_sf_main_md_m','minimum_sf_offset_md_m']:
                         if col in disp: disp[col.replace('_m','_ft')]=disp[col]*M_TO_FT; disp.drop(columns=[col],inplace=True)
-                    disp=disp.rename(columns={'main_md_ft':'Main MD (ft)','offset_md_ft':'Offset MD (ft)','separation_ft':'Min separation (ft)','horizontal_separation_ft':'Horizontal separation (ft)','vertical_separation_ft':'Vertical separation (ft)','directional_uncertainty_ft':'Directional 1σ uncertainty (ft)','separation_factor':'Separation factor','status':'Status','offset':'Offset well'})
+                    disp=disp.rename(columns={'main_md_ft':'Closest-approach main MD (ft)','offset_md_ft':'Closest-approach offset MD (ft)','separation_ft':'Closest centreline separation (ft)','horizontal_separation_ft':'Horizontal separation (ft)','vertical_separation_ft':'Vertical separation (ft)','directional_uncertainty_ft':'1σ at closest approach (ft)','minimum_sf_separation_ft':'Separation at minimum SF (ft)','minimum_sf_directional_uncertainty_ft':'1σ at minimum SF (ft)','minimum_sf_main_md_ft':'Main MD at minimum SF (ft)','minimum_sf_offset_md_ft':'Offset MD at minimum SF (ft)','separation_factor':'Minimum sampled SF','separation_factor_at_closest_approach':'SF at closest approach','status':'Status','offset':'Offset well'})
                     st.dataframe(disp,use_container_width=True,hide_index=True)
+                    if _risk_rows:
+                        st.markdown('#### Collision-risk intervals (SF below the required value)'); st.dataframe(pd.DataFrame(_risk_rows),use_container_width=True,hide_index=True)
+                    else: st.caption('No main-well MD interval has a sampled SF below the required value.')
                     review_statuses={'ALERT','WARNING','REVIEW','NOT CHECKED'}
                     alerts=disp[disp['Status'].isin(review_statuses)]
                     passed=int((disp['Status']=='PASS').sum())
@@ -855,24 +1090,18 @@ elif page=='Well Control':
         r=well_control_screen(sid,tvd,mw,maasp,fg); r['SICP_psi']=sicp; r['SIDPP_SICP_difference_psi']=sid-sicp; st.dataframe(pd.DataFrame([r]),use_container_width=True,hide_index=True)
         st.info('SIDPP is used for the basic kill-MW estimate in this screening engine. SICP is displayed for comparison; operational kill calculations must follow approved company procedures and kill sheets.')
 
-# BHA
-elif page=='BHA & Drilling':
-    page_header('BHA & Drilling Configuration', 'DRILLING ENGINEERING', 'Document the bit, motor/RSS, MWD/LWD, collars, HWDP and drillpipe configuration associated with the plan.')
-    df=pd.DataFrame(project.get('bha',[]));
-    if df.empty: df=pd.DataFrame([{'component':'Bit','type':'PDC','OD_in':8.5,'length_m':0.3,'weight_lbft':0,'role':'Drill'}])
-    bha_display=df.copy();
-    if 'length_m' in bha_display.columns: bha_display['length_ft']=bha_display['length_m']*M_TO_FT; bha_display.drop(columns=['length_m'],inplace=True)
-    ed=st.data_editor(bha_display,num_rows='dynamic',use_container_width=True,hide_index=True,key='bha');
-    if st.button('Save BHA'):
-        bha_save=ed.copy();
-        if 'length_ft' in bha_save.columns: bha_save['length_m']=bha_save['length_ft']*FT_TO_M; bha_save.drop(columns=['length_ft'],inplace=True)
-        project['bha']=bha_save.to_dict('records'); save(); st.success('BHA saved.')
-    st.info('Use this section to document bit, motor/RSS, MWD/LWD, collars, HWDP and drillpipe configuration. Mechanical design remains an engineering-development workflow.')
-
 # Visualization
 elif page=='Visualization':
     page_header('Integrated Well Visualization', 'OUTPUTS', 'Professional plan, vertical-section, 3D and wall-plot views using a well-relative project frame. Targets, offsets and covariance uncertainty are explicitly plotted and included in the wall-plot export.')
-    main=pd.DataFrame(project.get('surveys',[]))
+    _active_surv=pd.DataFrame(project.get('surveys',[])); _planned_surv=pd.DataFrame(project.get('planned_surveys',[]))
+    _pbundle=project.get('planned_trajectory_metadata') or {}; _presult=_pbundle.get('planner_result',{})
+    main=_active_surv
+    if len(_planned_surv)>1 and {'Easting','Northing','TVD','MD'}.issubset(_planned_surv.columns):
+        _src=st.radio('Trajectory to display',['Planned candidate','Active survey'],horizontal=True,key='viz_traj_source',help='A candidate that is not PASS is never written to the active survey; choose Planned candidate to inspect it.')
+        if _src=='Planned candidate':
+            main=display_path(_planned_surv,_presult).reset_index(drop=True)
+            if _presult.get('status')!='PASS':
+                st.warning(f"Showing a **{_presult.get('status','REVIEW')}** candidate, drawn only ~100 ft beyond its best target approach (display clipping; the stored trajectory is unchanged).")
     required_cols={'Easting','Northing','TVD','MD'}
 
     def _surface_xy(obj=None):
@@ -999,6 +1228,21 @@ elif page=='Visualization':
         span=max(xmax-xmin,ymax-ymin,100.0); pad=max(50.0,span*0.08)
         return xmin-pad,xmax+pad,ymin-pad,ymax+pad
 
+    def _event_points():
+        # Target interceptions (planner) and closest-approach locations (last anti-collision scan), main-well frame.
+        pts=[]
+        try:
+            mds=[r.get('intercept_md_m') for r in _presult.get('target_sequence_results',[])]
+            for r,mdv in zip(_presult.get('target_sequence_results',[]),mds):
+                if mdv is None or not math.isfinite(float(mdv)) or float(mdv)>float(main['MD'].max())+1e-6: continue
+                q=interpolate_path(main,[float(mdv)]).iloc[0]; pts.append(('Intercept: '+str(r.get('name','Target')),float(q.Northing),float(q.Easting),float(q.TVD),'star'))
+            for r in project.get('anticollision_last',[]):
+                mdv=r.get('main_md_m')
+                if mdv is None or not math.isfinite(float(mdv)) or float(mdv)>float(main['MD'].max())+1e-6: continue
+                q=interpolate_path(main,[float(mdv)]).iloc[0]; pts.append(('Closest approach: '+str(r.get('offset','Offset')),float(q.Northing),float(q.Easting),float(q.TVD),'x'))
+        except Exception: pass
+        return pts
+
     if main.empty or not required_cols.issubset(main.columns):
         st.info('No calculated trajectory is available yet. Import surveys or create and calculate a trajectory in **Survey Manager** / **Trajectory Planner**.')
     else:
@@ -1057,6 +1301,7 @@ elif page=='Visualization':
 
         if view=='Plan':
             fig.add_trace(go.Scatter(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,mode='lines+markers',name=project['well_name'],line=dict(width=3),marker=dict(size=4)))
+            for _lbl,_pn,_pe,_pz,_sym in _event_points(): fig.add_trace(go.Scatter(x=[_pe*M_TO_FT],y=[_pn*M_TO_FT],mode='markers+text',text=[_lbl],textposition='top right',name=_lbl,marker=dict(size=12,symbol=_sym)))
             if show_offsets:
                 for off in project.get('offsets',[]): _add_offset_plan(fig,off)
             if show_targets:
@@ -1097,6 +1342,7 @@ elif page=='Visualization':
         elif view=='3D':
             fig=go.Figure()
             fig.add_trace(go.Scatter3d(x=mr['E_rel_m']*M_TO_FT,y=mr['N_rel_m']*M_TO_FT,z=-main['TVD']*M_TO_FT,mode='lines+markers',name=project['well_name'],line=dict(width=6),marker=dict(size=2)))
+            for _lbl,_pn,_pe,_pz,_sym in _event_points(): fig.add_trace(go.Scatter3d(x=[_pe*M_TO_FT],y=[_pn*M_TO_FT],z=[-_pz*M_TO_FT],mode='markers+text',text=[_lbl],name=_lbl,marker=dict(size=6,symbol='diamond' if _sym=='star' else 'x')))
             if show_offsets:
                 for off in project.get('offsets',[]):
                     od=_trajectory_relative(pd.DataFrame(off.get('surveys',[])),off.get('surface_easting_m',0.0),off.get('surface_northing_m',0.0))
@@ -1224,7 +1470,11 @@ elif page=='QA/QC':
     if not s.empty:
         interval_m=float(project.get('trajectory_metadata',{}).get('dls_interval_m',30.0) or 30.0); max_dls_100=dls_for_interval_to_100ft(float(s.get('DLS',pd.Series([0])).max()),interval_m); max_inc=float(s.Inc.max()); max_inc_allowed=float(dc.get('max_inclination_deg',180)); max_dls_allowed=dls_30m_to_100ft(float(dc.get('max_dls_deg_30m',999)))
         extra += [{'check':'Max inclination constraint','status':'PASS' if max_inc<=max_inc_allowed+1e-6 else 'FAIL','message':f'Max {max_inc:.2f}° vs limit {max_inc_allowed:.2f}°.'},{'check':'Max DLS constraint','status':'PASS' if max_dls_100<=max_dls_allowed+1e-6 else 'FAIL','message':f'Max {max_dls_100:.2f}°/100ft vs limit {max_dls_allowed:.2f}°/100ft.'}]
-    meta=project.get('trajectory_metadata',{}).get('planner_result',{})
+    _qa_bundle=project.get('planned_trajectory_metadata') or project.get('trajectory_metadata',{})
+    meta=_qa_bundle.get('planner_result',{})
+    if meta.get('validation_status') is not None or meta.get('status') is not None:
+        extra.append({'check':'Trajectory independent validation','status':'PASS' if meta.get('validation_status',meta.get('status'))=='PASS' and not _stale_reasons else 'REVIEW','message':f"Result class {meta.get('result_class',meta.get('status'))}; violations: {', '.join(meta.get('constraint_violations',[])) or 'none'}."})
+    for _sr in _stale_reasons: extra.append({'check':'Plan dependency','status':'REVIEW','message':_sr})
     if meta:
         laterr=float(meta.get('lateral_error_m',0))*M_TO_FT; tvderr=abs(float(meta.get('tvd_error_m',0)))*M_TO_FT; extra += [{'check':'Trajectory target lateral error','status':'PASS' if laterr<=100 else 'WARN','message':f'{laterr:.1f} ft.'},{'check':'Trajectory target TVD error','status':'PASS' if tvderr<=100 else 'WARN','message':f'{tvderr:.1f} ft.'}]
     results.extend(extra); st.dataframe(pd.DataFrame(results),use_container_width=True,hide_index=True)
@@ -1234,7 +1484,10 @@ elif page=='QA/QC':
 # Reports
 elif page=='Reports':
     page_header('Engineering Practice Report', 'OUTPUTS', 'Export the shared project state and QA/QC results as a reproducible practice record.')
-    report={'platform':'Well Planning Platform','generated_utc':datetime.utcnow().isoformat()+'Z','project':project_to_json(project),'qa_qc':validate_project(project)}
+    _pb=project.get('planned_trajectory_metadata') or project.get('trajectory_metadata') or {}
+    report={'platform':'Well Planning Platform','generated_utc':datetime.utcnow().isoformat()+'Z','project':project_to_json(project),'qa_qc':validate_project(project),
+            'trajectory_plan':to_jsonable({'result_class':_pb.get('planner_result',{}).get('result_class',_pb.get('planner_result',{}).get('status')),'validation_status':_pb.get('planner_result',{}).get('validation_status'),'violations':_pb.get('planner_result',{}).get('constraint_violations',[]),'stale_reasons':_stale_reasons,'target_sequence_results':_pb.get('planner_result',{}).get('target_sequence_results',[]),'anti_collision':_pb.get('planner_result',{}).get('collision_validation',[]),'anti_collision_last_scan':project.get('anticollision_last',[])}),
+            'disclaimer':'Engineering-development software. PASS means the implemented checks passed; it is not operational certification.'}
     st.json({'platform':report['platform'],'well':project['well_name'],'qa_checks':len(report['qa_qc'])})
     st.download_button('Download full project report JSON',json.dumps(report,indent=2).encode(),file_name=f"{project['well_name']}_report.json",mime='application/json')
     st.download_button('Download survey CSV',pd.DataFrame(project.get('surveys',[])).to_csv(index=False).encode(),file_name=f"{project['well_name']}_survey.csv",mime='text/csv')
@@ -1263,7 +1516,6 @@ Well Planning Platform is a browser-first, project-independent workspace for lea
 - Torque & drag screening
 - Cement-volume screening
 - Well-control screening
-- BHA/drilling documentation
 - Integrated plan, vertical-section and 3D visualization
 - Project JSON and engineering-practice report export
 
