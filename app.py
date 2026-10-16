@@ -20,7 +20,7 @@ from core.survey_qc import survey_quality_report
 from core.trajectory import interpolate_path
 from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to_magnetic, magnetic_to_grid, grid_to_magnetic, reference_requirements, convert_to_project_reference
 from models.geomagnetic import wmm2025, igrf14
-from models.geodesy import crs_info, transform_coordinates, grid_convergence_deg, normal_gravity, noaa_geoid_height, common_crs_registry, search_crs_registry, transformation_report
+from models.geodesy import crs_info, transform_coordinates, grid_convergence_deg, normal_gravity, noaa_geoid_height, common_crs_registry, search_crs_registry, transformation_report, projected_coordinates_to_metres, metres_to_projected_coordinates, transform_projected_grid_metres
 from engineering.anti_collision import clearance_report
 from models.survey_uncertainty import station_covariances
 from engineering.casing import casing_screen, casing_program_summary, casing_geometry_checks, casing_design_checks
@@ -279,61 +279,158 @@ elif page=='Project & Reference':
     if saved_design not in profile_options: saved_design='J-Profile'
     project['well_design']=d.selectbox('Well design',profile_options,index=profile_options.index(saved_design),format_func=lambda x:profile_labels.get(x,x),help='This is the shared well-design preset used by the Trajectory Planner. J-profile and Build & Hold are treated as the same profile; S-profile and Build-Hold-Drop are treated as the same profile.')
 
-    st.markdown('### Location & coordinate system')
-    a,b,c=st.columns(3); project['latitude']=a.number_input('Latitude (°)',-90.,90.,float(project['latitude']),format='%.6f'); project['longitude']=b.number_input('Longitude (°)',-180.,180.,float(project['longitude']),format='%.6f'); project['elevation_m']=c.number_input('Wellhead elevation (ft)',-6500.,33000.,float(project['elevation_m'])*3.280839895) / 3.280839895
-    current_crs=str(project.get('crs','EPSG:4326'))
-    crs_modes=['Auto UTM from location','Geographic WGS84','Choose from CRS registry','Custom CRS / EPSG']
-    if current_crs.upper() in ('EPSG:4326','4326'):
-        default_mode='Geographic WGS84'
-    elif current_crs.upper() in ('EPSG:32631','EPSG:32632','EPSG:32633','EPSG:32731','EPSG:32732'):
-        default_mode='Auto UTM from location'
-    else:
-        default_mode='Choose from CRS registry'
-    crs_mode=st.selectbox('Coordinate system',crs_modes,index=crs_modes.index(default_mode),help='Choose a common CRS, search the installed EPSG registry, or enter an EPSG code/WKT definition.')
-    if crs_mode=='Auto UTM from location':
-        zone=int((float(project['longitude'])+180)//6)+1; epsg=32600+zone if float(project['latitude'])>=0 else 32700+zone; project['crs']=f'EPSG:{epsg}'
-    elif crs_mode=='Geographic WGS84':
-        project['crs']='EPSG:4326'
-    elif crs_mode=='Choose from CRS registry':
-        common=common_crs_registry()
-        current_code=current_crs.upper().replace(' ','')
-        known_codes={item['code'].upper():item['code'] for item in common}
-        if current_code not in known_codes:
-            common.insert(0, {'label': f'Current project CRS ({current_crs})', 'code': current_crs, 'region': 'Current project'})
-        labels=[f"{item['label']}" for item in common]
-        code_to_label={item['code']:item['label'] for item in common}
-        known_codes={item['code'].upper():item['code'] for item in common}
-        default_label=code_to_label[known_codes[current_code]] if current_code in known_codes else labels[0]
-        selected_common=st.selectbox('Common CRS',labels,index=labels.index(default_label),help='Includes WGS 84, Minna, NAD83 and ETRS89 examples. Check the exact CRS and transformation availability for your location.')
-        search_text=st.text_input('Search installed EPSG registry by name or code',placeholder='e.g. Minna, NAD83, 26332, UTM zone 32N')
-        search_results=search_crs_registry(search_text,limit=50) if search_text.strip() else []
-        if search_results:
-            result_labels=[f"{item['label']}" for item in search_results]
-            chosen_search=st.selectbox('EPSG search results',result_labels,key='crs_registry_result')
-            project['crs']=next(item['code'] for item in search_results if item['label']==chosen_search)
-        else:
-            project['crs']=next(item['code'] for item in common if item['label']==selected_common)
-            if search_text.strip(): st.info('No matching CRS found in the installed EPSG database. Try a shorter name or exact EPSG code.')
-    else:
-        project['crs']=st.text_input('Custom CRS / EPSG / WKT',current_crs,help='Custom CRS input is validated by PROJ. Prefer an EPSG identifier where available.')
-    # Derive the wellhead projected coordinates from the authoritative lat/lon when the project CRS is projected.
+    st.markdown('### Geodetic reference and location')
+    st.caption('Choose the project CRS first. Coordinate inputs are transformed into this reference; projected grid coordinates are stored in metres, while drilling lengths and depths remain in the engineering model’s SI base units and are converted for display as needed.')
+
+    # The selected CRS is the authoritative horizontal reference for the project.
+    common = common_crs_registry()
+    query = st.text_input('Search CRS registry by EPSG code, CRS name or datum', value='', key='crs_registry_search')
+    matches = search_crs_registry(query, limit=60) if query.strip() else []
+    by_code = {x['code']: x for x in common + matches}
+    previous_crs = str(project.get('crs', 'EPSG:32632'))
+    current_code = previous_crs
+    if current_code not in by_code:
+        try:
+            current_info = crs_info(current_code)
+            by_code[current_code] = {'code': current_code, 'name': current_info['name'], 'datum': current_info['datum'], 'type': current_info['type'], 'units': current_info['units']}
+        except Exception:
+            current_code = 'EPSG:32632'
+            previous_crs = current_code
+            project['crs'] = current_code
+    crs_items = list(by_code.values())
+    crs_codes = [x['code'] for x in crs_items]
+    if current_code not in crs_codes:
+        crs_codes.append(current_code)
+        by_code[current_code] = {'code': current_code, 'name': current_code, 'datum': 'Unknown', 'type': 'Unknown', 'units': 'Unknown'}
+    chosen_code = st.selectbox('Project coordinate reference system (CRS)', crs_codes,
+        index=crs_codes.index(current_code), format_func=lambda code: f"{code} — {by_code.get(code, {}).get('name', code)} [{by_code.get(code, {}).get('datum', 'datum unknown')}]",
+        help='The CRS includes the datum/reference frame and, for projected systems, the projection and coordinate units. Search to find other installed EPSG CRSs.')
     try:
         from pyproj import CRS
-        if CRS.from_user_input(project['crs']).is_projected:
-            project['surface_easting_m'], project['surface_northing_m'] = transform_coordinates(project['longitude'], project['latitude'], 'EPSG:4326', project['crs'])
-    except Exception:
-        pass
-    a,b,c=st.columns(3); project['kb_m']=a.number_input('KB elevation (ft)',-6500.,33000.,float(project['kb_m'])*3.280839895) / 3.280839895; project['planned_date']=str(b.date_input('Planning date',date.fromisoformat(project['planned_date']))); project['units']=c.selectbox('Display units',['Field','Metric'],index=0 if project.get('units','Field')=='Field' else 1)
-    st.markdown('### Derived reference information')
+        previous_crs_obj = CRS.from_user_input(previous_crs)
+        chosen_crs_obj = CRS.from_user_input(chosen_code)
+        if chosen_code != previous_crs:
+            if (project.get('targets') or project.get('offsets')) and not chosen_crs_obj.is_projected:
+                st.error('This project already contains absolute grid targets or offset coordinates. Keep a projected project CRS so those coordinates remain unambiguous; you can still enter the wellhead as latitude/longitude.')
+                chosen_code = previous_crs
+                chosen_crs_obj = previous_crs_obj
+            elif previous_crs_obj.is_projected and chosen_crs_obj.is_projected:
+                # Stage every transformation first. Commit only if all are valid, so a
+                # missing datum grid cannot leave the project half-reprojected.
+                try:
+                    new_surface = transform_projected_grid_metres(
+                        project.get('surface_easting_m', 0.0), project.get('surface_northing_m', 0.0), previous_crs, chosen_code)
+                    new_targets = []
+                    for target in project.get('targets', []):
+                        source_code = target.get('crs', previous_crs)
+                        if not CRS.from_user_input(source_code).is_projected:
+                            raise ValueError(f"Target {target.get('name', 'unnamed')} has no valid projected source CRS.")
+                        new_targets.append((target, *transform_projected_grid_metres(
+                            target.get('east_m', 0.0), target.get('north_m', 0.0), source_code, chosen_code)))
+                    new_offsets = []
+                    for offset in project.get('offsets', []):
+                        source_code = offset.get('crs', previous_crs)
+                        if offset.get('surface_easting_m') is not None and offset.get('surface_northing_m') is not None:
+                            if not CRS.from_user_input(source_code).is_projected:
+                                raise ValueError(f"Offset {offset.get('name', 'unnamed')} has no valid projected source CRS.")
+                            new_offsets.append((offset, *transform_projected_grid_metres(
+                                offset['surface_easting_m'], offset['surface_northing_m'], source_code, chosen_code)))
+                except Exception as transform_error:
+                    st.error(f'CRS change cancelled to protect project consistency: {transform_error}. Keep the current CRS until a suitable datum transformation/grid is available.')
+                    chosen_code = previous_crs
+                    chosen_crs_obj = previous_crs_obj
+                else:
+                    project['surface_easting_m'], project['surface_northing_m'] = new_surface
+                    for target, east_m, north_m in new_targets:
+                        target['east_m'], target['north_m'], target['crs'] = east_m, north_m, chosen_code
+                    for offset, east_m, north_m in new_offsets:
+                        offset['surface_easting_m'], offset['surface_northing_m'], offset['crs'] = east_m, north_m, chosen_code
+            elif chosen_crs_obj.is_projected:
+                # Previous reference was geographic/non-projected: seed the grid from the saved lat/lon.
+                _e_native, _n_native = transform_coordinates(project.get('longitude', 0.0), project.get('latitude', 0.0), 'EPSG:4326', chosen_code, strict=True, lon=project.get('longitude', 0.0), lat=project.get('latitude', 0.0))
+                project['surface_easting_m'], project['surface_northing_m'] = projected_coordinates_to_metres(_e_native, _n_native, chosen_code)
+                for target in project.get('targets', []):
+                    target['crs'] = chosen_code
+            project['crs'] = chosen_code
+            project.setdefault('reference_data', {})['project_crs'] = chosen_code
+        else:
+            project['crs'] = chosen_code
+        active_crs = CRS.from_user_input(project['crs'])
+        active_info = crs_info(project['crs'])
+        project.setdefault('reference_data', {})['datum'] = active_info.get('datum')
+        project['reference_data']['ellipsoid'] = active_info.get('ellipsoid')
+        project['reference_data']['project_crs'] = project['crs']
+        project['reference_data']['source_crs'] = 'EPSG:4326' if project.get('coordinate_input_mode') == 'Latitude / Longitude' else project['crs']
+        project['reference_data']['input_coordinate_crs'] = project['reference_data']['source_crs']
+        if not active_crs.is_projected:
+            st.warning('The selected CRS is not projected. Latitude/longitude can be used, but absolute grid Northing/Easting targets and grid-based trajectory planning require a projected CRS.')
+    except Exception as exc:
+        active_crs = None
+        st.error(f'Invalid project CRS: {exc}')
+
+    input_modes = ['Latitude / Longitude', 'Grid Northing / Easting (m)']
+    saved_mode = project.get('coordinate_input_mode', input_modes[0])
+    if saved_mode not in input_modes: saved_mode = input_modes[0]
+    mode = st.radio('Wellhead coordinate input', input_modes, index=input_modes.index(saved_mode), horizontal=True,
+                    help='Choose either geographic coordinates or projected grid coordinates. Grid Easting/Northing are entered in metres and stored in metres.')
+    project['coordinate_input_mode'] = mode
+    if mode == 'Latitude / Longitude':
+        a,b,c = st.columns(3)
+        project['latitude'] = a.number_input('Latitude (°)', -90.0, 90.0, float(project.get('latitude', 4.8)), format='%.7f')
+        project['longitude'] = b.number_input('Longitude (°)', -180.0, 180.0, float(project.get('longitude', 6.9)), format='%.7f')
+        project['elevation_m'] = c.number_input('Wellhead elevation (ft)', -6500.0, 33000.0, float(project.get('elevation_m', 25.0))*M_TO_FT) * FT_TO_M
+        if active_crs is not None and active_crs.is_projected:
+            try:
+                _e_native, _n_native = transform_coordinates(project['longitude'], project['latitude'], 'EPSG:4326', project['crs'], strict=True, lon=project['longitude'], lat=project['latitude'])
+                project['surface_easting_m'], project['surface_northing_m'] = projected_coordinates_to_metres(_e_native, _n_native, project['crs'])
+                # Keep the alternate grid-input widgets synchronized when users switch modes.
+                st.session_state[f'surface_easting_m_{project.get("crs", "crs")}'] = project['surface_easting_m']
+                st.session_state[f'surface_northing_m_{project.get("crs", "crs")}'] = project['surface_northing_m']
+            except Exception as exc:
+                st.error(f'Could not transform latitude/longitude to the selected project CRS: {exc}')
+    else:
+        if active_crs is not None and active_crs.is_projected:
+            a,b,c = st.columns(3)
+            project['surface_northing_m'] = a.number_input('Grid Northing (m)', -100000000.0, 100000000.0, float(project.get('surface_northing_m', 0.0)), format='%.3f', key=f'surface_northing_m_{project.get("crs", "crs")}')
+            project['surface_easting_m'] = b.number_input('Grid Easting (m)', -100000000.0, 100000000.0, float(project.get('surface_easting_m', 0.0)), format='%.3f', key=f'surface_easting_m_{project.get("crs", "crs")}')
+            project['elevation_m'] = c.number_input('Wellhead elevation (ft)', -6500.0, 33000.0, float(project.get('elevation_m', 25.0))*M_TO_FT) * FT_TO_M
+            try:
+                _e_native, _n_native = metres_to_projected_coordinates(project['surface_easting_m'], project['surface_northing_m'], project['crs'])
+                project['longitude'], project['latitude'] = transform_coordinates(_e_native, _n_native, project['crs'], 'EPSG:4326')
+            except Exception as exc:
+                st.error(f'Could not transform grid coordinates to latitude/longitude: {exc}')
+        else:
+            st.info('Select a projected CRS to enter Northing/Easting. The current CRS uses geographic coordinates.')
+
+    a,b,c=st.columns(3)
+    project['kb_m']=a.number_input('KB elevation (ft)',-6500.,33000.,float(project.get('kb_m',25.0))*M_TO_FT) * FT_TO_M
+    project['planned_date']=str(b.date_input('Planning date',date.fromisoformat(project['planned_date'])))
+    project['units']=c.selectbox('Engineering display units',['Field','Metric'],index=0 if project.get('units','Field')=='Field' else 1)
+
+    st.markdown('### Active reference details')
     try:
-        ci=crs_info(project['crs']); conv=grid_convergence_deg(project['latitude'],project['longitude'],project['crs']); project['reference_data']['grid_convergence_deg']=conv; project['reference_data']['project_crs']=project['crs']; project['reference_data']['datum']=ci.get('datum'); project['reference_data']['ellipsoid']=ci.get('ellipsoid')
-        if ci.get('epsg'):
-            st.success(f"Active CRS: {ci['name']} • EPSG:{ci['epsg']} • Grid convergence: {conv:.4f}°")
-        else: st.success(f"Active CRS: {ci['name']} • Grid convergence: {conv:.4f}°")
-        st.dataframe(pd.DataFrame([ci]),use_container_width=True,hide_index=True)
+        ci = crs_info(project['crs'])
+        conv = grid_convergence_deg(project['latitude'], project['longitude'], project['crs'])
+        project['reference_data']['grid_convergence_deg'] = conv
+        project['reference_data']['project_crs'] = project['crs']
+        project['reference_data']['datum'] = ci.get('datum')
+        project['reference_data']['ellipsoid'] = ci.get('ellipsoid')
+        st.success(f"Active CRS: {ci['name']} • {project['crs']} • Datum/reference frame: {ci.get('datum')} • Grid convergence: {conv:.4f}°")
+        st.dataframe(pd.DataFrame([ci]), use_container_width=True, hide_index=True)
         if ci.get('type') == 'Projected':
-            st.info(f"Wellhead projected position: Easting {project.get('surface_easting_m',0):,.3f} m ({project.get('surface_easting_m',0)*M_TO_FT:,.2f} ft) • Northing {project.get('surface_northing_m',0):,.3f} m ({project.get('surface_northing_m',0)*M_TO_FT:,.2f} ft)")
-    except Exception as e: st.error(f'CRS/reference calculation error: {e}')
+            st.info(f"Wellhead grid position: Northing {project.get('surface_northing_m',0):,.3f} m • Easting {project.get('surface_easting_m',0):,.3f} m • Geographic position: {project.get('latitude',0):.7f}°, {project.get('longitude',0):.7f}°")
+        if mode == 'Latitude / Longitude':
+            report = transformation_report('EPSG:4326', project['crs'], lon=project['longitude'], lat=project['latitude'])
+        elif ci.get('type') == 'Projected':
+            report = transformation_report(project['crs'], 'EPSG:4326', lon=project['longitude'], lat=project['latitude'])
+        else:
+            report = None
+        if report and not report.get('best_available'):
+            st.warning(f"No suitable non-ballpark transformation with stated accuracy was confirmed for this CRS pair at the well location. Current displayed coordinates may require local grid resources or control data. Details: {report.get('description', 'No operation details available')}")
+        elif report:
+            st.caption(f"Transformation check: {report.get('description', 'Operation selected by PROJ')} • stated accuracy: {report.get('accuracy_m') if report.get('accuracy_m') is not None else 'not stated'} m. Verify datum suitability and local control before operational use.")
+    except Exception as e:
+        st.error(f'CRS/reference calculation error: {e}')
     a,b,c=st.columns(3); project['north_reference']=a.selectbox('Primary north reference',['True North','Grid North','Magnetic North'],index=['True North','Grid North','Magnetic North'].index(project.get('north_reference','Grid North'))); depth_options=['MD / TVDSS','MD / TVD']; project['depth_reference']=b.selectbox('Depth reference',depth_options,index=depth_options.index(project.get('depth_reference','MD / TVDSS'))); project['status']=c.selectbox('Project status',['Planning','Draft','Under Review','Approved for Training'],index=['Planning','Draft','Under Review','Approved for Training'].index(project.get('status','Planning')))
     st.markdown('### Design constraints')
     dc=project['design_constraints']; a,b,c=st.columns(3); dc['max_dls_deg_30m']=dls_100ft_to_30m(a.number_input('Max DLS (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_dls_deg_30m'])))); dc['max_inclination_deg']=b.number_input('Max inclination (°)',0.,180.,float(dc['max_inclination_deg'])); dc['max_build_rate_deg_30m']=dls_100ft_to_30m(c.number_input('Max build rate (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_build_rate_deg_30m']))))
@@ -688,14 +785,14 @@ elif page=='Trajectory Planner':
 
 # Targets
 elif page=='Targets':
-    page_header('Target Management', 'SETUP', 'Create and manage target geometries in the project CRS. Absolute Easting/Northing are stored internally in the CRS native units (metres for EPSG:32632).')
+    page_header('Target Management', 'SETUP', 'Create and manage targets in the project CRS. Absolute grid Easting/Northing are entered and stored in metres; target depth, tolerances and dimensions remain in field units on the interface and are converted internally.')
     st.caption('Target coordinates are absolute project coordinates; the trajectory planner converts them to offsets from the wellhead automatically.')
-    types=['Point','Circular','Elliptical','Rectangular','Corridor','Polygon']; typ=st.selectbox('New target type',types); a,b,c=st.columns(3); name=a.text_input('Target name','Target-01'); n=a.number_input('Center Northing (ft)',-10000000.,10000000.,float(project.get('surface_northing_m',0))*M_TO_FT); e=b.number_input('Center Easting (ft)',-10000000.,10000000.,float(project.get('surface_easting_m',0))*M_TO_FT);
+    types=['Point','Circular','Elliptical','Rectangular','Corridor','Polygon']; typ=st.selectbox('New target type',types); a,b,c=st.columns(3); name=a.text_input('Target name','Target-01'); n=a.number_input('Center grid Northing (m)',-10000000.,10000000.,float(project.get('surface_northing_m',0)),format='%.3f'); e=b.number_input('Center grid Easting (m)',-10000000.,10000000.,float(project.get('surface_easting_m',0)),format='%.3f');
     if project.get('depth_reference','MD / TVDSS')=='MD / TVDSS':
         tvdss=c.number_input('Target TVDSS (ft)',-50000.,50000.,-12000.)
     else:
         tvd=c.number_input('Target TVD (ft)',0.,50000.,12000.); tvdss=(float(project.get('kb_m',0))-tvd*FT_TO_M)*M_TO_FT
-    t={'name':name,'type':typ,'north_m':n*FT_TO_M,'east_m':e*FT_TO_M,'tvdss_m':tvdss*FT_TO_M}
+    t={'name':name,'type':typ,'north_m':n,'east_m':e,'tvdss_m':tvdss*FT_TO_M,'crs':project.get('crs'),'grid_units':'m'}
     with st.expander('Target tolerance and thickness', expanded=False):
         ta,tb,tc=st.columns(3)
         t['tolerance_m']=ta.number_input('Lateral tolerance (ft)',0.0,5000.0,100.0,key='target_tol_ft',help='Point targets: acceptance radius. All targets: default vertical band when no vertical tolerance is given.')*FT_TO_M
@@ -742,12 +839,13 @@ elif page=='Targets':
     if st.button('Add target',type='primary'):
         if not name.strip(): st.error('Target name is required.')
         elif t.get('intersection_angle_enabled') and float(t.get('min_intersection_angle_deg',0)) > float(t.get('max_intersection_angle_deg',90)): st.error('Minimum plane-intersection angle must not exceed maximum angle.')
-        elif project.get('crs','').upper()=='EPSG:4326': st.error('Select a projected project CRS before creating an absolute-coordinate target.')
+        elif not __import__('pyproj').CRS.from_user_input(project.get('crs','EPSG:4326')).is_projected: st.error('Select a projected project CRS before creating an absolute-coordinate target.')
         else: project['targets'].append(t); save(); st.success('Target added.')
     if project['targets']:
         td=pd.DataFrame(project['targets']).copy()
-        for col in ['north_m','east_m','tvdss_m','radius_m','semi_major_m','semi_minor_m','length_m','width_m','half_length_m','half_width_m']:
+        for col in ['tvdss_m','radius_m','semi_major_m','semi_minor_m','length_m','width_m','half_length_m','half_width_m']:
             if col in td.columns: td[col.replace('_m','_ft')]=td[col]*M_TO_FT; td.drop(columns=[col],inplace=True)
+        td=td.rename(columns={'north_m':'Grid Northing (m)','east_m':'Grid Easting (m)','tvdss_ft':'TVDSS (ft)','tolerance_ft':'Tolerance (ft)'})
         st.dataframe(td,use_container_width=True,hide_index=True)
         st.markdown('#### Delete a target')
         delete_idx=st.selectbox('Select target to delete',range(len(project['targets'])),format_func=lambda i: project['targets'][i].get('name',f'Target {i+1}'),key='delete_target_index')
@@ -774,8 +872,8 @@ elif page=='Targets':
         st.caption(f'Geometry type: **{typ_e}** — to change the geometry type, create a new target.')
         ea,eb,ec=st.columns(3)
         et['name']=ea.text_input('Name',str(et.get('name','')),key=f'edit_name_{k}')
-        en=eb.number_input('Center Northing (ft)',-10000000.,10000000.,float(et.get('north_m',0))*M_TO_FT,key=f'edit_n_{k}')
-        ee=ec.number_input('Center Easting (ft)',-10000000.,10000000.,float(et.get('east_m',0))*M_TO_FT,key=f'edit_e_{k}')
+        en=eb.number_input('Center grid Northing (m)',-10000000.,10000000.,float(et.get('north_m',0)),format='%.3f',key=f'edit_n_{k}')
+        ee=ec.number_input('Center grid Easting (m)',-10000000.,10000000.,float(et.get('east_m',0)),format='%.3f',key=f'edit_e_{k}')
         eta,etb,etc=st.columns(3)
         etv=eta.number_input('Target TVDSS (ft)',-50000.,50000.,float(et.get('tvdss_m',0))*M_TO_FT,key=f'edit_tvdss_{k}')
         etol=etb.number_input('Lateral tolerance (ft)',0.0,5000.0,float(et.get('tolerance_m',30.48))*M_TO_FT,key=f'edit_tol_{k}')
@@ -803,7 +901,7 @@ elif page=='Targets':
             elif str(et['name']) in other_names: st.error('Another target already uses this name.')
             elif typ_e=='Polygon' and len(et.get('points',[]))<3: st.error('A polygon needs at least three valid vertices.')
             else:
-                et.update({'north_m':en*FT_TO_M,'east_m':ee*FT_TO_M,'tvdss_m':etv*FT_TO_M,'tolerance_m':etol*FT_TO_M,'vertical_tolerance_m':evt*FT_TO_M,'thickness_m':eth*FT_TO_M,'dip_deg':edip,'dip_direction_deg':eddir,'inclined_plane_enabled':bool(edip>0)})
+                et.update({'north_m':en,'east_m':ee,'crs':project.get('crs'),'grid_units':'m','tvdss_m':etv*FT_TO_M,'tolerance_m':etol*FT_TO_M,'vertical_tolerance_m':evt*FT_TO_M,'thickness_m':eth*FT_TO_M,'dip_deg':edip,'dip_direction_deg':eddir,'inclined_plane_enabled':bool(edip>0)})
                 project['targets'][edit_idx]=et; save(); st.success('Target updated. Any saved trajectory that depends on it is now marked REVIEW until regenerated.'); st.rerun()
 
 # Offsets
@@ -811,7 +909,8 @@ elif page=='Offsets':
     page_header('Offset Wells', 'SETUP', 'Create independent reference wells. Surface latitude/longitude are transformed automatically into the project CRS; relative project-grid offsets are then derived.')
     a,b,c=st.columns(3); name=a.text_input('Offset name','OW-01'); lat=b.number_input('Offset latitude',-90.,90.,float(project['latitude']),format='%.6f'); lon=c.number_input('Offset longitude',-180.,180.,float(project['longitude']),format='%.6f')
     try:
-        off_e,off_n=transform_coordinates(lon,lat,'EPSG:4326',project.get('crs','EPSG:4326'))
+        _off_e_native,_off_n_native=transform_coordinates(lon,lat,'EPSG:4326',project.get('crs','EPSG:4326'),strict=True,lon=lon,lat=lat)
+        off_e,off_n=projected_coordinates_to_metres(_off_e_native,_off_n_native,project.get('crs','EPSG:4326'))
         main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0))
         st.info(f'Automatically transformed to project CRS {project.get("crs")}: Easting {off_e*M_TO_FT:,.2f} ft • Northing {off_n*M_TO_FT:,.2f} ft • Relative ΔN {(off_n-main_n)*M_TO_FT:,.2f} ft • ΔE {(off_e-main_e)*M_TO_FT:,.2f} ft')
     except Exception as ex:
@@ -819,7 +918,7 @@ elif page=='Offsets':
     if st.button('Create offset well'):
         if off_e is None: st.error('Cannot create offset without a valid project-coordinate transformation.')
         else:
-            project['offsets'].append({'name':name,'latitude':lat,'longitude':lon,'surface_northing_m':off_n,'surface_easting_m':off_e,'crs':project.get('crs'),'north_reference':project.get('north_reference','Grid North'),'azimuth_reference':project.get('north_reference','Grid North'),'surveys':[{'MD':0.,'Inc':0.,'Azi':0.}]}); save(); st.success('Offset created in the project CRS.')
+            project['offsets'].append({'name':name,'latitude':lat,'longitude':lon,'surface_northing_m':off_n,'surface_easting_m':off_e,'crs':project.get('crs'),'source_crs':'EPSG:4326','north_reference':project.get('north_reference','Grid North'),'azimuth_reference':project.get('north_reference','Grid North'),'surveys':[{'MD':0.,'Inc':0.,'Azi':0.}]}); save(); st.success('Offset created in the project CRS.')
     for i,off in enumerate(project['offsets']):
         with st.expander(f"{i+1}. {off.get('name','Offset')}"):
             main_n=float(project.get('surface_northing_m',0.0)); main_e=float(project.get('surface_easting_m',0.0)); off_n=float(off.get('surface_northing_m',main_n)); off_e=float(off.get('surface_easting_m',main_e))
@@ -933,21 +1032,11 @@ elif page=='Geodesy':
         project_crs=CRS.from_user_input(project.get('crs','EPSG:4326'))
         if project_crs.is_projected:
             ex=float(project.get('surface_easting_m',0)); ny=float(project.get('surface_northing_m',0))
-            st.success(f'Wellhead normalized to project CRS: **{project.get("crs")}** • Easting {ex:.3f} m ({ex*M_TO_FT:.2f} ft) • Northing {ny:.3f} m ({ny*M_TO_FT:.2f} ft)')
+            st.success(f'Wellhead normalized to project CRS: **{project.get("crs")}** • Easting {ex:.3f} m • Northing {ny:.3f} m')
         else:
             st.info('The selected project CRS is geographic. Absolute project-grid calculations are unavailable until a projected CRS is selected.')
     except Exception as e: st.error(f'Project CRS normalization error: {e}')
-    with st.expander('CRS registry & coordinate transformation diagnostics', expanded=True):
-        st.markdown('**Installed CRS registry**')
-        st.caption('The registry is provided by the installed PROJ/EPSG database. Searching it is local; transformation grids may still need to be installed separately.')
-        a,b=st.columns([2,1]); registry_query=a.text_input('Find a CRS by name or EPSG code',placeholder='e.g. Minna, 26332, UTM zone 32N',key='geodesy_crs_search'); max_results=b.selectbox('Maximum results',[10,25,50],index=1)
-        if registry_query.strip():
-            try:
-                matches=search_crs_registry(registry_query,max_results)
-                if matches: st.dataframe(pd.DataFrame(matches),use_container_width=True,hide_index=True)
-                else: st.info('No matching CRS found in the installed EPSG database.')
-            except Exception as e: st.warning(f'CRS search failed: {e}')
-        st.markdown('**Coordinate transformation**')
+    with st.expander('Advanced coordinate transformation utility'):
         src_default='EPSG:4326'; dst_default=project.get('crs','EPSG:4326')
         try:
             src_crs=CRS.from_user_input(src_default)
@@ -955,24 +1044,10 @@ elif page=='Geodesy':
             x_label='Input X / Longitude (°)' if src_crs.is_geographic else 'Input X / Easting (native units)'; y_label='Input Y / Latitude (°)' if src_crs.is_geographic else 'Input Y / Northing (native units)'
         except Exception:
             x_default=float(project.get('surface_easting_m',0)); y_default=float(project.get('surface_northing_m',0)); x_label='Input X'; y_label='Input Y'
-        a,b,c,d=st.columns(4); x=a.number_input(x_label,-1e8,1e8,x_default); y=b.number_input(y_label,-1e8,1e8,y_default); src=c.text_input('Source CRS',src_default,key='transform_source_crs'); dst=d.text_input('Target CRS',dst_default,key='transform_target_crs')
-        strict_transform=st.checkbox('Require an available non-ballpark transformation (recommended)',value=True,help='Rejects transformations that PROJ can only perform with a ballpark approximation. It does not certify the result for operational surveying.')
-        if st.button('Check transformation availability'):
-            try:
-                report=transformation_report(src,dst,lon=float(project['longitude']),lat=float(project['latitude']))
-                st.write({'Source':report['source_name'],'Target':report['target_name'],'Available operations':report['operation_count'],'Best operation available':report['best_available'],'Missing-grid operations':len(report['unavailable_operations'])})
-                if report['operations']:
-                    st.dataframe(pd.DataFrame([{k:v for k,v in op.items() if k!='definition'} for op in report['operations']]),use_container_width=True,hide_index=True)
-                if report['unavailable_operations']:
-                    st.warning('Some transformations are unavailable because required resources may be missing. Inspect the unavailable-operation details before relying on a conversion.')
-                    st.json(report['unavailable_operations'])
-                if report['operation_count']==0: st.error('No non-ballpark operation is currently available for this source/target pair and area of interest.')
-            except Exception as e: st.error(f'Transformation check failed: {e}')
+        a,b,c,d=st.columns(4); x=a.number_input(x_label,-1e8,1e8,x_default); y=b.number_input(y_label,-1e8,1e8,y_default); src=c.text_input('Source CRS',src_default); dst=d.text_input('Target CRS',dst_default)
         if st.button('Transform coordinates (advanced)'):
             try:
-                xx,yy=transform_coordinates(x,y,src,dst,strict=strict_transform,lon=float(project['longitude']),lat=float(project['latitude']))
-                st.success(f'Transformed X = {xx:.3f}, Y = {yy:.3f} • Source: {src} • Target: {dst}')
-                st.caption('Transformation output uses the destination CRS axis units. Confirm axis order and units before using the result in well-planning calculations.')
+                xx,yy=transform_coordinates(x,y,src,dst); st.success(f'Transformed X = {xx:.3f}, Y = {yy:.3f}')
             except Exception as e: st.error(str(e))
     st.caption('NOAA GEOID18 is a U.S./territory geoid service. It is not a global geoid model and is not applicable to this Nigeria training location.')
     if st.button('Query NOAA geoid service'):

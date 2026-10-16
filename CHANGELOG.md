@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-16 — Geodetic reference and coordinate-unit consistency
+
+- Added a searchable installed EPSG/PROJ CRS registry to Project & Reference, with the datum/reference frame shown as part of each CRS selection.
+- Added either/or wellhead input: latitude/longitude or grid Northing/Easting in metres.
+- Normalized absolute grid coordinates to metres even when a projected CRS uses non-metre native units; conversion to CRS-native units happens at transformation boundaries.
+- Changed target creation, target editing, and target tables to use metres for absolute grid Northing/Easting. Target depths, tolerances, and shape dimensions remain field-unit inputs where applicable and are converted internally.
+- Added safe reprojection of stored wellhead, target-center, and offset surface coordinates when changing between projected CRSs. Changes are staged and cancelled if a suitable non-ballpark transformation with stated accuracy is unavailable.
+- Added source CRS metadata for offset coordinate inputs and target CRS metadata; documented coordinate-unit conventions.
+- Tests: geodesy/registry and project tests pass; app workflow/UI smoke tests pass; trajectory-planner/multi-target tests pass. The full suite did not complete within the available runtime window.
+
 ## 2026-10-15 — Audit, correction and independent-validation pass
 
 See `GAP_ANALYSIS.md` for evidence, tests and open items.
@@ -167,10 +177,3 @@ See `GAP_ANALYSIS.md` for evidence, tests and open items.
 - Added a configurable separation-factor threshold to the independent anti-collision screening report; the report samples the pairwise trajectory grid and separately reports geometric closest approach and minimum sampled SF locations.
 - Added target deletion confirmation and marks saved trajectories that depended on a deleted target as REVIEW.
 - Added regression tests for general optimization, missing offset survey review, target sequence metadata, inclined plane geometry and intersection-angle calculations.
-
-
-## CRS registry integration (2026-10-16)
-- Added curated common CRS options including WGS 84, Minna, NAD83 and ETRS89 examples.
-- Added search against the locally installed EPSG CRS database.
-- Added transformation diagnostics for available non-ballpark operations, reported operation accuracy, and unavailable operations / grid resources.
-- Added optional strict coordinate transformation mode and tests for registry lookup and WGS 84 / UTM conversion.

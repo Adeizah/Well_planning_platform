@@ -125,12 +125,12 @@ The trajectory optimizer uses SciPy differential evolution to search the paramet
 
 Offset survey CSV imports require columns `MD`, `Inc`, and `Azi`, with MD in ft and inclination/azimuth in degrees. The application converts MD to internal metres and calculates positions using minimum curvature. Surface-only offsets are shown as markers and cannot support full subsurface anti-collision evaluation.
 
-## CRS registry and coordinate transformations
 
-The platform uses `pyproj`/PROJ for CRS definitions and coordinate operations. The Project & Reference page provides common choices (including WGS 84 and Minna examples) plus search of the locally installed EPSG database. The Geodesy page reports candidate non-ballpark transformations, operation accuracy when supplied by PROJ, and unavailable operations/resources. The advanced transformation utility can require a non-ballpark operation.
+## Geodetic reference and coordinate-unit convention
 
-Important limitations:
-- EPSG registry availability does not mean every transformation is available locally or suitable for every location. Some operations require transformation grids that must be installed separately.
-- Minna datum coordinates must be transformed using an operation appropriate to the location; do not relabel them as WGS 84.
-- Coordinate-operation accuracy metadata is not a guarantee of field survey accuracy. Confirm the source datum, CRS, coordinate epoch where applicable, axis order, units, and transformation resources before using coordinates for engineering decisions.
-- Vertical datums and well-specific elevation references (including ground level and RKB) remain distinct from the horizontal CRS.
+- The Project & Reference page owns the horizontal project CRS. The CRS selection shows its datum/reference frame and projection; search the installed EPSG/PROJ registry by code, CRS name, or datum.
+- The wellhead can be entered either as latitude/longitude or as grid Northing/Easting. Grid input is available only for projected CRSs.
+- Absolute project grid Easting/Northing are normalized and stored in metres, including when the selected projected CRS uses feet natively. Conversion to CRS-native units is performed only at transformation boundaries.
+- Target centers and offset-well surface coordinates use the same metre-normalized project grid convention. Local trajectory distances, MD/TVD, target tolerances, and geometry dimensions continue to use the platform's internal metre representation and are converted to feet for field-unit displays where appropriate.
+- When the project CRS changes between projected CRSs, the application transforms the wellhead, target centers, and offset surface coordinates instead of merely relabelling the data. Source CRS metadata is retained for imported offset coordinates where available.
+- A datum/CRS transformation can depend on installed PROJ grid files and local control data. Check the transformation diagnostics and survey provenance; this application does not certify a transformation for operational use.
