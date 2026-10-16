@@ -302,8 +302,14 @@ elif page=='Project & Reference':
     if current_code not in crs_codes:
         crs_codes.append(current_code)
         by_code[current_code] = {'code': current_code, 'name': current_code, 'datum': 'Unknown', 'type': 'Unknown', 'units': 'Unknown'}
+    # Searching should make the matching CRS easy to select. If the current CRS
+    # is not among the search matches, preselect the first match rather than
+    # leaving an unrelated CRS (e.g. ETRS89) active without an obvious cue.
+    select_index = crs_codes.index(current_code)
+    if query.strip() and matches and current_code not in {item['code'] for item in matches}:
+        select_index = crs_codes.index(matches[0]['code'])
     chosen_code = st.selectbox('Project coordinate reference system (CRS)', crs_codes,
-        index=crs_codes.index(current_code), format_func=lambda code: f"{code} — {by_code.get(code, {}).get('name', code)} [{by_code.get(code, {}).get('datum', 'datum unknown')}]",
+        index=select_index, format_func=lambda code: f"{code} — {by_code.get(code, {}).get('name', code)} [{by_code.get(code, {}).get('datum', 'datum unknown')}]",
         help='The CRS includes the datum/reference frame and, for projected systems, the projection and coordinate units. Search to find other installed EPSG CRSs.')
     try:
         from pyproj import CRS

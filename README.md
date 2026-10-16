@@ -134,3 +134,9 @@ Offset survey CSV imports require columns `MD`, `Inc`, and `Azi`, with MD in ft 
 - Target centers and offset-well surface coordinates use the same metre-normalized project grid convention. Local trajectory distances, MD/TVD, target tolerances, and geometry dimensions continue to use the platform's internal metre representation and are converted to feet for field-unit displays where appropriate.
 - When the project CRS changes between projected CRSs, the application transforms the wellhead, target centers, and offset surface coordinates instead of merely relabelling the data. Source CRS metadata is retained for imported offset coordinates where available.
 - A datum/CRS transformation can depend on installed PROJ grid files and local control data. Check the transformation diagnostics and survey provenance; this application does not certify a transformation for operational use.
+
+### Geodetic CRS diagnostics update (2026-10-16)
+- CRS validity is kept separate from transformation-operation availability.
+- Transformation diagnostics now fall back to a non-AOI diagnostic attempt if PROJ cannot construct an AOI-specific transformer; this avoids a UI crash and reports availability/limitations instead.
+- CRS search preselects the first matching result when the current CRS does not match the search, so a query such as `Minna` does not leave an unrelated CRS selected silently.
+- A CRS appearing in the registry does not certify a suitable high-accuracy datum transformation. Verify location, operation accuracy, and any required grid resources before operational use.
