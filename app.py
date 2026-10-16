@@ -81,7 +81,7 @@ def download_json():
 NAV = [
     ('HOME', ['Dashboard']),
     ('SETUP', ['Project & Reference', 'Well Architecture', 'Targets', 'Offsets']),
-    ('DIRECTIONAL', ['Survey Manager', 'Trajectory Planner', 'Geomagnetics', 'Geodesy', 'Anti-Collision']),
+    ('DIRECTIONAL', ['Survey Manager', 'Trajectory Planner', 'Anti-Collision']),
     ('DRILLING ENGINEERING', ['Casing Design', 'Hydraulics & ECD', 'PP / FG & Mud Window', 'Torque & Drag', 'Cementing', 'Well Control', 'BHA & Drilling']),
     ('OUTPUTS', ['Visualization', 'QA/QC', 'Reports']),
     ('SYSTEM', ['About']),
@@ -97,8 +97,6 @@ NAV_PREFIX = {
     'Offsets': '05',
     'Survey Manager': '06',
     'Trajectory Planner': '07',
-    'Geomagnetics': '08',
-    'Geodesy': '09',
     'Anti-Collision': '10',
     'Casing Design': '11',
     'Hydraulics & ECD': '12',
@@ -440,6 +438,50 @@ elif page=='Project & Reference':
     a,b,c=st.columns(3); project['north_reference']=a.selectbox('Primary north reference',['True North','Grid North','Magnetic North'],index=['True North','Grid North','Magnetic North'].index(project.get('north_reference','Grid North'))); depth_options=['MD / TVDSS','MD / TVD']; project['depth_reference']=b.selectbox('Depth reference',depth_options,index=depth_options.index(project.get('depth_reference','MD / TVDSS'))); project['status']=c.selectbox('Project status',['Planning','Draft','Under Review','Approved for Training'],index=['Planning','Draft','Under Review','Approved for Training'].index(project.get('status','Planning')))
     st.markdown('### Design constraints')
     dc=project['design_constraints']; a,b,c=st.columns(3); dc['max_dls_deg_30m']=dls_100ft_to_30m(a.number_input('Max DLS (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_dls_deg_30m'])))); dc['max_inclination_deg']=b.number_input('Max inclination (°)',0.,180.,float(dc['max_inclination_deg'])); dc['max_build_rate_deg_30m']=dls_100ft_to_30m(c.number_input('Max build rate (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_build_rate_deg_30m']))))
+    st.markdown('### Geomagnetic model and automatic reference calculations')
+    st.caption('Reference quantities are calculated from the project location and planning date, stored in the project model, and reused by survey/trajectory workflows. The former standalone Geodesy and Geomagnetics pages are no longer part of the navigation.')
+    saved_model = project.get('model_metadata', {}).get('active_geomagnetic_model', project.get('reference_data', {}).get('geomagnetic_model', 'IGRF-14'))
+    if saved_model not in ['IGRF-14', 'WMM2025']:
+        saved_model = 'IGRF-14'
+    selected_model = st.selectbox('Geomagnetic model', ['IGRF-14', 'WMM2025'], index=['IGRF-14', 'WMM2025'].index(saved_model), help='IGRF-14 is the latest IGRF generation; WMM2025 is an alternative global model.')
+    project.setdefault('model_metadata', {})['active_geomagnetic_model'] = selected_model
+    try:
+        # Recompute reference values whenever project location, CRS, elevation, date or model changes.
+        conv = grid_convergence_deg(float(project['latitude']), float(project['longitude']), project['crs'])
+        grav = normal_gravity(float(project['latitude']), float(project.get('elevation_m', 0.0)))
+        refdata = project.setdefault('reference_data', {})
+        refdata['grid_convergence_deg'] = conv
+        refdata['gravity_mps2'] = grav
+        refdata['project_crs'] = project['crs']
+        refdata['geomagnetic_model'] = selected_model
+        dt_calc = date.fromisoformat(str(project['planned_date']))
+        if selected_model == 'IGRF-14':
+            mag = igrf14(float(project['latitude']), float(project['longitude']), float(project.get('elevation_m', 0.0)), dt_calc)
+        else:
+            mag = wmm2025(float(project['latitude']), float(project['longitude']), float(project.get('elevation_m', 0.0)), dt_calc)
+        refdata.update({'magnetic_declination_deg': mag['D'], 'magnetic_dip_deg': mag['I'], 'magnetic_total_field_nT': mag['F'], 'magnetic_horizontal_field_nT': mag['H'], 'magnetic_x_nT': mag['X'], 'magnetic_y_nT': mag['Y'], 'magnetic_z_nT': mag['Z'], 'geomagnetic_model_metadata': mag['metadata']})
+        project['model_metadata'][selected_model] = mag['metadata']
+        project['model_metadata'].setdefault('results', {})[selected_model] = mag
+        project['reference_data']['magnetic_declination_deg'] = mag['D']
+        project['reference_data']['magnetic_dip_deg'] = mag['I']
+        project['reference_data']['magnetic_total_field_nT'] = mag['F']
+        a,b,c,d = st.columns(4)
+        a.metric('Grid convergence', f'{conv:.4f}°')
+        b.metric('Magnetic declination', f"{mag['D']:.4f}°")
+        c.metric('Magnetic dip', f"{mag['I']:.4f}°")
+        d.metric('Total magnetic field', f"{mag['F']:.1f} nT")
+        st.caption(f"Calculated for {dt_calc.isoformat()} using {mag['metadata'].get('model', selected_model)} • {mag['metadata'].get('source', 'model library')} • normal gravity {grav:.6f} m/s². Values are reused by the backend; verify model provenance and survey requirements before operational use.")
+    except Exception as exc:
+        st.warning(f'Reference quantities could not all be refreshed: {exc}. The project CRS remains selected, but missing magnetic values must not be assumed valid.')
+    with st.expander('Advanced geodesy diagnostics and coordinate transformation'):
+        try:
+            st.write(crs_info(project['crs']))
+            report = transformation_report('EPSG:4326', project['crs'], lon=project.get('longitude'), lat=project.get('latitude'))
+            st.write(report)
+        except Exception as exc:
+            st.warning(f'Geodesy diagnostic unavailable: {exc}')
+        st.caption('Grid convergence, normal gravity and magnetic field quantities are computed automatically above. This section is for diagnostics, not a required workflow page.')
+
     if st.button('Save project/reference settings',type='primary'): save(); st.success('Saved.')
 
 # Survey Manager
