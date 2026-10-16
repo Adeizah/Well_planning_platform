@@ -48,7 +48,7 @@ See `GAP_ANALYSIS.md` for evidence, tests and open items.
 - Added integrated offset trajectories and visualization.
 - Added casing architecture and design screening.
 - Expanded hydraulics, T&D, cement and well-control screens.
-- Earlier revisions included BHA/drilling configuration; the active BHA page has now been removed from navigation. Legacy `bha` project data is preserved for backward compatibility.
+- Added BHA/drilling configuration.
 - Added integrated visualization for plan, vertical section and 3D views.
 - Added stronger project QA/QC and report export.
 - Clarified screening versus validated engineering status throughout the product.
@@ -168,9 +168,9 @@ See `GAP_ANALYSIS.md` for evidence, tests and open items.
 - Added target deletion confirmation and marks saved trajectories that depended on a deleted target as REVIEW.
 - Added regression tests for general optimization, missing offset survey review, target sequence metadata, inclined plane geometry and intersection-angle calculations.
 
-## 2026-10-15 — Essential workflow follow-up
 
-- Removed the BHA & Drilling page from active navigation and page routing; legacy `bha` project data remains in the schema for compatibility.
-- Added Fixed KOP and KOP-window controls to the general trajectory optimizer UI. The selected restriction is passed to the optimizer and independent validator.
-- Added explicit upper-bound KOP penalty and candidate rejection to the general optimizer.
-- Updated workflow tests and README scope notes.
+## CRS registry integration (2026-10-16)
+- Added curated common CRS options including WGS 84, Minna, NAD83 and ETRS89 examples.
+- Added search against the locally installed EPSG CRS database.
+- Added transformation diagnostics for available non-ballpark operations, reported operation accuracy, and unavailable operations / grid resources.
+- Added optional strict coordinate transformation mode and tests for registry lookup and WGS 84 / UTM conversion.

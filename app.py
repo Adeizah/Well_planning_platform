@@ -20,7 +20,7 @@ from core.survey_qc import survey_quality_report
 from core.trajectory import interpolate_path
 from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to_magnetic, magnetic_to_grid, grid_to_magnetic, reference_requirements, convert_to_project_reference
 from models.geomagnetic import wmm2025, igrf14
-from models.geodesy import crs_info, transform_coordinates, grid_convergence_deg, normal_gravity, noaa_geoid_height
+from models.geodesy import crs_info, transform_coordinates, grid_convergence_deg, normal_gravity, noaa_geoid_height, common_crs_registry, search_crs_registry, transformation_report
 from engineering.anti_collision import clearance_report
 from models.survey_uncertainty import station_covariances
 from engineering.casing import casing_screen, casing_program_summary, casing_geometry_checks, casing_design_checks
@@ -82,7 +82,7 @@ NAV = [
     ('HOME', ['Dashboard']),
     ('SETUP', ['Project & Reference', 'Well Architecture', 'Targets', 'Offsets']),
     ('DIRECTIONAL', ['Survey Manager', 'Trajectory Planner', 'Geomagnetics', 'Geodesy', 'Anti-Collision']),
-    ('DRILLING ENGINEERING', ['Casing Design', 'Hydraulics & ECD', 'PP / FG & Mud Window', 'Torque & Drag', 'Cementing', 'Well Control']),
+    ('DRILLING ENGINEERING', ['Casing Design', 'Hydraulics & ECD', 'PP / FG & Mud Window', 'Torque & Drag', 'Cementing', 'Well Control', 'BHA & Drilling']),
     ('OUTPUTS', ['Visualization', 'QA/QC', 'Reports']),
     ('SYSTEM', ['About']),
 ]
@@ -106,10 +106,11 @@ NAV_PREFIX = {
     'Torque & Drag': '14',
     'Cementing': '15',
     'Well Control': '16',
-    'Visualization': '17',
-    'QA/QC': '18',
-    'Reports': '19',
-    'About': '20',
+    'BHA & Drilling': '17',
+    'Visualization': '18',
+    'QA/QC': '19',
+    'Reports': '20',
+    'About': '21',
 }
 
 # Keep navigation stable across reruns. The engineering model remains in session state.
@@ -280,13 +281,41 @@ elif page=='Project & Reference':
 
     st.markdown('### Location & coordinate system')
     a,b,c=st.columns(3); project['latitude']=a.number_input('Latitude (°)',-90.,90.,float(project['latitude']),format='%.6f'); project['longitude']=b.number_input('Longitude (°)',-180.,180.,float(project['longitude']),format='%.6f'); project['elevation_m']=c.number_input('Wellhead elevation (ft)',-6500.,33000.,float(project['elevation_m'])*3.280839895) / 3.280839895
-    crs_mode=st.selectbox('Coordinate system',['Auto UTM from location','Geographic WGS84','Custom CRS / EPSG'],index=0 if project.get('crs','EPSG:4326').startswith('EPSG:326') or project.get('crs','') in ('EPSG:4326','') else 2)
+    current_crs=str(project.get('crs','EPSG:4326'))
+    crs_modes=['Auto UTM from location','Geographic WGS84','Choose from CRS registry','Custom CRS / EPSG']
+    if current_crs.upper() in ('EPSG:4326','4326'):
+        default_mode='Geographic WGS84'
+    elif current_crs.upper() in ('EPSG:32631','EPSG:32632','EPSG:32633','EPSG:32731','EPSG:32732'):
+        default_mode='Auto UTM from location'
+    else:
+        default_mode='Choose from CRS registry'
+    crs_mode=st.selectbox('Coordinate system',crs_modes,index=crs_modes.index(default_mode),help='Choose a common CRS, search the installed EPSG registry, or enter an EPSG code/WKT definition.')
     if crs_mode=='Auto UTM from location':
         zone=int((float(project['longitude'])+180)//6)+1; epsg=32600+zone if float(project['latitude'])>=0 else 32700+zone; project['crs']=f'EPSG:{epsg}'
     elif crs_mode=='Geographic WGS84':
         project['crs']='EPSG:4326'
+    elif crs_mode=='Choose from CRS registry':
+        common=common_crs_registry()
+        current_code=current_crs.upper().replace(' ','')
+        known_codes={item['code'].upper():item['code'] for item in common}
+        if current_code not in known_codes:
+            common.insert(0, {'label': f'Current project CRS ({current_crs})', 'code': current_crs, 'region': 'Current project'})
+        labels=[f"{item['label']}" for item in common]
+        code_to_label={item['code']:item['label'] for item in common}
+        known_codes={item['code'].upper():item['code'] for item in common}
+        default_label=code_to_label[known_codes[current_code]] if current_code in known_codes else labels[0]
+        selected_common=st.selectbox('Common CRS',labels,index=labels.index(default_label),help='Includes WGS 84, Minna, NAD83 and ETRS89 examples. Check the exact CRS and transformation availability for your location.')
+        search_text=st.text_input('Search installed EPSG registry by name or code',placeholder='e.g. Minna, NAD83, 26332, UTM zone 32N')
+        search_results=search_crs_registry(search_text,limit=50) if search_text.strip() else []
+        if search_results:
+            result_labels=[f"{item['label']}" for item in search_results]
+            chosen_search=st.selectbox('EPSG search results',result_labels,key='crs_registry_result')
+            project['crs']=next(item['code'] for item in search_results if item['label']==chosen_search)
+        else:
+            project['crs']=next(item['code'] for item in common if item['label']==selected_common)
+            if search_text.strip(): st.info('No matching CRS found in the installed EPSG database. Try a shorter name or exact EPSG code.')
     else:
-        project['crs']=st.text_input('Custom CRS / EPSG',project.get('crs','EPSG:4326'))
+        project['crs']=st.text_input('Custom CRS / EPSG / WKT',current_crs,help='Custom CRS input is validated by PROJ. Prefer an EPSG identifier where available.')
     # Derive the wellhead projected coordinates from the authoritative lat/lon when the project CRS is projected.
     try:
         from pyproj import CRS
@@ -456,18 +485,6 @@ elif page=='Trajectory Planner':
         gc2.number_input('Required separation factor', min_value=0.1, max_value=10.0, value=float(st.session_state.get('general_min_sf',2.0)), key='general_min_sf', help='Final clearance screening threshold. Company-approved criteria and validated uncertainty models are required for operational use.')
         gc3.number_input('Optimizer iterations', min_value=10, max_value=300, value=int(st.session_state.get('general_max_iter',60)), step=10, key='general_max_iter')
         st.number_input('Search time budget (s)', min_value=10, max_value=600, value=int(st.session_state.get('general_time_budget',90)), step=10, key='general_time_budget', help='Upper limit on search time. If it is reached without a validated candidate the result is NO FEASIBLE CANDIDATE FOUND (a failed search, not a proof of infeasibility).')
-        general_kop_mode = st.selectbox('General optimizer KOP control', ['Free KOP', 'Fixed KOP', 'KOP window'], index=0, key='general_kop_mode', help='Constrains the first build point for the flexible optimizer. These constraints are independently checked on the generated trajectory.')
-        general_min_kop_m = general_max_kop_m = None
-        if general_kop_mode == 'Fixed KOP':
-            general_fixed_kop_ft = st.number_input('Fixed KOP MD (ft)', min_value=0.0, max_value=49213.0, value=float(kop_ft), key='general_fixed_kop_ft')
-            general_min_kop_m = general_max_kop_m = general_fixed_kop_ft * FT_TO_M
-        elif general_kop_mode == 'KOP window':
-            gk1, gk2 = st.columns(2)
-            general_min_kop_ft = gk1.number_input('General optimizer minimum KOP (ft)', min_value=0.0, max_value=49213.0, value=max(0.0, float(kop_ft)-100.0), key='general_min_kop_ft')
-            general_max_kop_ft = gk2.number_input('General optimizer maximum KOP (ft)', min_value=0.0, max_value=49213.0, value=min(49213.0, float(kop_ft)+100.0), key='general_max_kop_ft')
-            if general_min_kop_ft > general_max_kop_ft:
-                st.error('General optimizer minimum KOP must not exceed maximum KOP.')
-            general_min_kop_m, general_max_kop_m = general_min_kop_ft * FT_TO_M, general_max_kop_ft * FT_TO_M
     st.caption(f'Current design preset: **{saved_profile}**. Selected calculation profile: **{profile}**. The stored survey changes only when you generate the trajectory.')
     if st.button('Generate trajectory for selected shape',type='primary'):
         try:
@@ -475,16 +492,6 @@ elif page=='Trajectory Planner':
             if planning_mode != 'General trajectory optimizer (experimental)' and requested_peak > max_inc + 1e-9:
                 raise ValueError(f'{profile} requires a peak inclination of {requested_peak:.1f}°, above the project maximum inclination of {max_inc:.1f}°. Update the design constraint first if this profile is intended.')
             if planning_mode == 'General trajectory optimizer (experimental)':
-                general_min_kop_m = general_max_kop_m = None
-                _gkm = st.session_state.get('general_kop_mode', 'Free KOP')
-                if _gkm == 'Fixed KOP':
-                    _gk = float(st.session_state.get('general_fixed_kop_ft', kop_ft)) * FT_TO_M
-                    general_min_kop_m = general_max_kop_m = _gk
-                elif _gkm == 'KOP window':
-                    general_min_kop_m = float(st.session_state.get('general_min_kop_ft', max(0.0, kop_ft-100.0))) * FT_TO_M
-                    general_max_kop_m = float(st.session_state.get('general_max_kop_ft', kop_ft+100.0)) * FT_TO_M
-                    if general_min_kop_m > general_max_kop_m:
-                        raise ValueError('General optimizer minimum KOP must not exceed maximum KOP.')
                 collision_col1, collision_col2, collision_col3 = st.columns(3)
                 # Values are read from stable Streamlit session keys on the next rerun;
                 # defaults are conservative screening inputs, not operational standards.
@@ -507,7 +514,6 @@ elif page=='Trajectory Planner':
                     uncertainty_parameters=sigma_params,
                     target_tolerance_m=30.48, control_points=6,
                     kb_m=float(project.get('kb_m',0) or 0), time_budget_s=float(st.session_state.get('general_time_budget',90)),
-                    min_kop_md_m=general_min_kop_m, max_kop_md_m=general_max_kop_m,
                 )
                 meta=dict(meta); meta['planning_mode']=planning_mode
                 meta['profile']='General control-point trajectory'
@@ -561,8 +567,7 @@ elif page=='Trajectory Planner':
             _val=validate_trajectory(out[['MD','Inc','Azi']], targets=target_sequence,
                 constraints={'max_inclination_deg':max_inc,'max_dls_deg_30m':float(_dc.get('max_dls_deg_30m',3.0) or 3.0),
                              'max_build_rate_deg_30m':float(_dc.get('max_build_rate_deg_30m',3.0) or 3.0),
-                             'max_turn_rate_deg_30m':float(_dc.get('max_turn_rate_deg_30m',3.0) or 3.0),
-                             **({'min_kop_md_m': general_min_kop_m, 'max_kop_md_m': general_max_kop_m} if planning_mode == 'General trajectory optimizer (experimental)' and general_min_kop_m is not None else {})},
+                             'max_turn_rate_deg_30m':float(_dc.get('max_turn_rate_deg_30m',3.0) or 3.0)},
                 offsets=project.get('offsets',[]), surface_easting_m=surface_e, surface_northing_m=surface_n,
                 kb_m=float(project.get('kb_m',0) or 0), survey_error_model=dict(project.get('survey_metadata',{}).get('survey_error_parameters',{})),
                 required_separation_factor=_req_sf, default_target_tolerance_m=30.48)
@@ -932,7 +937,17 @@ elif page=='Geodesy':
         else:
             st.info('The selected project CRS is geographic. Absolute project-grid calculations are unavailable until a projected CRS is selected.')
     except Exception as e: st.error(f'Project CRS normalization error: {e}')
-    with st.expander('Advanced coordinate transformation utility'):
+    with st.expander('CRS registry & coordinate transformation diagnostics', expanded=True):
+        st.markdown('**Installed CRS registry**')
+        st.caption('The registry is provided by the installed PROJ/EPSG database. Searching it is local; transformation grids may still need to be installed separately.')
+        a,b=st.columns([2,1]); registry_query=a.text_input('Find a CRS by name or EPSG code',placeholder='e.g. Minna, 26332, UTM zone 32N',key='geodesy_crs_search'); max_results=b.selectbox('Maximum results',[10,25,50],index=1)
+        if registry_query.strip():
+            try:
+                matches=search_crs_registry(registry_query,max_results)
+                if matches: st.dataframe(pd.DataFrame(matches),use_container_width=True,hide_index=True)
+                else: st.info('No matching CRS found in the installed EPSG database.')
+            except Exception as e: st.warning(f'CRS search failed: {e}')
+        st.markdown('**Coordinate transformation**')
         src_default='EPSG:4326'; dst_default=project.get('crs','EPSG:4326')
         try:
             src_crs=CRS.from_user_input(src_default)
@@ -940,10 +955,24 @@ elif page=='Geodesy':
             x_label='Input X / Longitude (°)' if src_crs.is_geographic else 'Input X / Easting (native units)'; y_label='Input Y / Latitude (°)' if src_crs.is_geographic else 'Input Y / Northing (native units)'
         except Exception:
             x_default=float(project.get('surface_easting_m',0)); y_default=float(project.get('surface_northing_m',0)); x_label='Input X'; y_label='Input Y'
-        a,b,c,d=st.columns(4); x=a.number_input(x_label,-1e8,1e8,x_default); y=b.number_input(y_label,-1e8,1e8,y_default); src=c.text_input('Source CRS',src_default); dst=d.text_input('Target CRS',dst_default)
+        a,b,c,d=st.columns(4); x=a.number_input(x_label,-1e8,1e8,x_default); y=b.number_input(y_label,-1e8,1e8,y_default); src=c.text_input('Source CRS',src_default,key='transform_source_crs'); dst=d.text_input('Target CRS',dst_default,key='transform_target_crs')
+        strict_transform=st.checkbox('Require an available non-ballpark transformation (recommended)',value=True,help='Rejects transformations that PROJ can only perform with a ballpark approximation. It does not certify the result for operational surveying.')
+        if st.button('Check transformation availability'):
+            try:
+                report=transformation_report(src,dst,lon=float(project['longitude']),lat=float(project['latitude']))
+                st.write({'Source':report['source_name'],'Target':report['target_name'],'Available operations':report['operation_count'],'Best operation available':report['best_available'],'Missing-grid operations':len(report['unavailable_operations'])})
+                if report['operations']:
+                    st.dataframe(pd.DataFrame([{k:v for k,v in op.items() if k!='definition'} for op in report['operations']]),use_container_width=True,hide_index=True)
+                if report['unavailable_operations']:
+                    st.warning('Some transformations are unavailable because required resources may be missing. Inspect the unavailable-operation details before relying on a conversion.')
+                    st.json(report['unavailable_operations'])
+                if report['operation_count']==0: st.error('No non-ballpark operation is currently available for this source/target pair and area of interest.')
+            except Exception as e: st.error(f'Transformation check failed: {e}')
         if st.button('Transform coordinates (advanced)'):
             try:
-                xx,yy=transform_coordinates(x,y,src,dst); st.success(f'Transformed X = {xx:.3f}, Y = {yy:.3f}')
+                xx,yy=transform_coordinates(x,y,src,dst,strict=strict_transform,lon=float(project['longitude']),lat=float(project['latitude']))
+                st.success(f'Transformed X = {xx:.3f}, Y = {yy:.3f} • Source: {src} • Target: {dst}')
+                st.caption('Transformation output uses the destination CRS axis units. Confirm axis order and units before using the result in well-planning calculations.')
             except Exception as e: st.error(str(e))
     st.caption('NOAA GEOID18 is a U.S./territory geoid service. It is not a global geoid model and is not applicable to this Nigeria training location.')
     if st.button('Query NOAA geoid service'):
@@ -1089,6 +1118,20 @@ elif page=='Well Control':
     if st.button('Run well-control screen',type='primary'):
         r=well_control_screen(sid,tvd,mw,maasp,fg); r['SICP_psi']=sicp; r['SIDPP_SICP_difference_psi']=sid-sicp; st.dataframe(pd.DataFrame([r]),use_container_width=True,hide_index=True)
         st.info('SIDPP is used for the basic kill-MW estimate in this screening engine. SICP is displayed for comparison; operational kill calculations must follow approved company procedures and kill sheets.')
+
+# BHA
+elif page=='BHA & Drilling':
+    page_header('BHA & Drilling Configuration', 'DRILLING ENGINEERING', 'Document the bit, motor/RSS, MWD/LWD, collars, HWDP and drillpipe configuration associated with the plan.')
+    df=pd.DataFrame(project.get('bha',[]));
+    if df.empty: df=pd.DataFrame([{'component':'Bit','type':'PDC','OD_in':8.5,'length_m':0.3,'weight_lbft':0,'role':'Drill'}])
+    bha_display=df.copy();
+    if 'length_m' in bha_display.columns: bha_display['length_ft']=bha_display['length_m']*M_TO_FT; bha_display.drop(columns=['length_m'],inplace=True)
+    ed=st.data_editor(bha_display,num_rows='dynamic',use_container_width=True,hide_index=True,key='bha');
+    if st.button('Save BHA'):
+        bha_save=ed.copy();
+        if 'length_ft' in bha_save.columns: bha_save['length_m']=bha_save['length_ft']*FT_TO_M; bha_save.drop(columns=['length_ft'],inplace=True)
+        project['bha']=bha_save.to_dict('records'); save(); st.success('BHA saved.')
+    st.info('Use this section to document bit, motor/RSS, MWD/LWD, collars, HWDP and drillpipe configuration. Mechanical design remains an engineering-development workflow.')
 
 # Visualization
 elif page=='Visualization':
@@ -1516,6 +1559,7 @@ Well Planning Platform is a browser-first, project-independent workspace for lea
 - Torque & drag screening
 - Cement-volume screening
 - Well-control screening
+- BHA/drilling documentation
 - Integrated plan, vertical-section and 3D visualization
 - Project JSON and engineering-practice report export
 
