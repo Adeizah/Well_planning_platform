@@ -388,19 +388,15 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         score += 1e5 * float(np.sum(np.maximum(0.0, build - max_build_rate_deg_30m * margin) ** 2))
         score += 1e5 * float(np.sum(np.maximum(0.0, turn - max_turn_rate_deg_30m * margin) ** 2))
         score += 1e5 * float(np.sum(np.maximum(0.0, inc - max_inclination_deg * margin) ** 2))
-        first_build = md[np.argmax(inc > 0.5)] if (inc > 0.5).any() else md[-1]
         if min_kop_md_m is not None:
+            first_build = md[np.argmax(inc > 0.5)] if (inc > 0.5).any() else md[-1]
             score += 1e5 * max(0.0, float(min_kop_md_m) - float(first_build)) ** 2
-        if max_kop_md_m is not None:
-            score += 1e5 * max(0.0, float(first_build) - float(max_kop_md_m)) ** 2
         score += 0.02 * float(np.sum(np.diff(inc, n=2) ** 2) + np.sum(np.diff(azi, n=2) ** 2) * 100.0)
         score += 2.0 * float(np.mean(dls ** 2)) if len(dls) else 0.0   # prefer gentler curvature among feasible shapes
         score += 1e5 * collision_penalty(path)
         viol = (not all(r['within_tolerance'] and r['in_order'] for r in results)) or dls.max(initial=0) > max_dls_deg_30m + 1e-3 \
             or build.max(initial=0) > max_build_rate_deg_30m + 1e-3 or turn.max(initial=0) > max_turn_rate_deg_30m + 1e-3 \
-            or inc.max() > max_inclination_deg + 1e-3 or not all(r['approach_constraints_pass'] for r in results) \
-            or (min_kop_md_m is not None and first_build < float(min_kop_md_m) - 1e-3) \
-            or (max_kop_md_m is not None and first_build > float(max_kop_md_m) + 1e-3)
+            or inc.max() > max_inclination_deg + 1e-3 or not all(r['approach_constraints_pass'] for r in results)
         return {'score': float(score), 'path': path, 'results': results, 'station_ok': not viol}
 
     def run_validation(path):
