@@ -74,3 +74,18 @@ def test_missing_datum_operation_is_not_silently_used_for_reprojection():
     # This environment does not include a suitable high-accuracy Minna/WGS84 grid operation.
     with pytest.raises(ValueError):
         transform_projected_grid_metres(500000.0, 600000.0, "EPSG:32632", "EPSG:26332")
+
+
+def test_transformation_report_does_not_crash_for_minna_projected_crs():
+    # A diagnostic report should survive PROJ rejecting an AOI-specific operation.
+    report = transformation_report("EPSG:26393", "EPSG:4326", lon=5.75, lat=19.26)
+    assert report["source_crs"]
+    assert report["target_crs"]
+    assert "best_available" in report
+    assert "description" in report
+
+
+def test_minna_projected_crs_is_recognized_even_if_transform_accuracy_is_unknown():
+    info = crs_info("EPSG:26393")
+    assert info["type"] == "Projected"
+    assert "Minna" in info["datum"]
