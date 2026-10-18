@@ -67,8 +67,15 @@ def target_tolerances(target, default_m=DEFAULT_TOLERANCE_M):
       the band is measured vertically).
     """
     t = target or {}
-    lateral = float(t.get('tolerance_m', default_m) or default_m)
-    vertical = float(t.get('vertical_tolerance_m', lateral) or lateral)
+    # Point targets are geometric points, not target areas. The returned zero
+    # tolerances are used for engineering acceptance; callers may use a separate
+    # numerical solver threshold solely to terminate iterative calculations.
+    if str(t.get('type', 'Point')).lower() == 'point':
+        lateral = 0.0
+        vertical = 0.0
+    else:
+        lateral = float(t.get('tolerance_m', default_m) or default_m)
+        vertical = float(t.get('vertical_tolerance_m', lateral) or lateral)
     thick = float(t.get('thickness_m', 0.0) or 0.0)
     if thick > 0:
         dip = math.radians(min(float(t.get('dip_deg', 0.0) or 0.0), 89.0))

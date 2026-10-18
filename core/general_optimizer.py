@@ -13,12 +13,21 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from core.trajectory import minimum_curvature, truncate_trajectory_at_md
+from core.trajectory import minimum_curvature, truncate_trajectory_at_md, lean_path, mc_core
 from core.geometry import target_tolerances
 from core.validation import (validate_trajectory, search_outcome, footprint_miss, survey_hash, STATUS_PASS,
                              STATUS_REVIEW, VALIDATOR_VERSION)
 from core.feasibility import reachability_screen
+from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M
+from scipy.optimize import least_squares
+from core.section_reconstruction import build_section_schedule, validate_section_schedule
+from core.section_optimizer import reoptimize_sections
 import time
+
+
+def _arr(path, name):
+    """Float array for a path column; ``path`` may be a DataFrame or a plain dict of arrays (lean inner loop)."""
+    return np.asarray(path[name], dtype=float)
 
 
 def _offset_path(offset: dict) -> pd.DataFrame:
@@ -35,7 +44,7 @@ def _offset_path(offset: dict) -> pd.DataFrame:
 
 
 def _interp_path(path: pd.DataFrame, column: str, md: np.ndarray) -> np.ndarray:
-    return np.interp(md, path['MD'].to_numpy(float), path[column].to_numpy(float))
+    return np.interp(md, _arr(path, 'MD'), path[column].to_numpy(float))
 
 
 def _plane_residual(north: float, east: float, tvd: float, target: dict) -> float:
@@ -56,8 +65,8 @@ def _oriented_target_residual(path: pd.DataFrame, target: dict, default_toleranc
     (lateral_error, vertical_error, md, miss). Station-resolution only: the final acceptance
     decision is made by core.validation on the arc-resampled path.
     """
-    n = path['Northing'].to_numpy(float); e = path['Easting'].to_numpy(float)
-    tvd = path['TVD'].to_numpy(float); md = path['MD'].to_numpy(float)
+    n = _arr(path, 'Northing'); e = _arr(path, 'Easting')
+    tvd = _arr(path, 'TVD'); md = _arr(path, 'MD')
     residual = np.array([_plane_residual(n[i], e[i], tvd[i], target) for i in range(len(md))]) if len(md) < 3 else (
         tvd - (float(target['tvd_m']) + math.tan(math.radians(float(target.get('dip_deg', 0.0) or 0.0))) *
                ((n - float(target['north_m'])) * math.cos(math.radians(float(target.get('dip_direction_deg', 0.0) or 0.0))) +
@@ -83,9 +92,9 @@ def _oriented_target_residual(path: pd.DataFrame, target: dict, default_toleranc
 
 
 def _approach_metrics(path: pd.DataFrame, md: float, target: dict):
-    inc = float(np.interp(md, path['MD'].to_numpy(float), path['Inc'].to_numpy(float)))
-    azis = np.unwrap(np.radians(path['Azi'].to_numpy(float)))
-    azi = float(np.degrees(np.interp(md, path['MD'].to_numpy(float), azis)) % 360.0)
+    inc = float(np.interp(md, _arr(path, 'MD'), _arr(path, 'Inc')))
+    azis = np.unwrap(np.radians(_arr(path, 'Azi')))
+    azi = float(np.degrees(np.interp(md, _arr(path, 'MD'), azis)) % 360.0)
     azi_diff = abs((azi - float(target.get('approach_azimuth_deg', azi)) + 180.0) % 360.0 - 180.0)
     inc_diff = abs(inc - float(target.get('approach_inclination_deg', inc)))
     dip = math.radians(float(target.get('dip_deg', 0.0) or 0.0))
@@ -172,6 +181,15 @@ def _bearing(n, e):
     return math.degrees(math.atan2(e, n)) % 360.0 if abs(n) + abs(e) > 1e-9 else 0.0
 
 
+def _path_summary(path, val):
+    """Headline numbers of a path for the Stage-1 vs final comparison table."""
+    m = val.get('metrics', {}) if val else {}
+    return {'final_md_m': float(path.MD.iloc[-1]), 'final_tvd_m': float(path.TVD.iloc[-1]), 'max_inclination_deg': float(m.get('max_inclination_deg', path.Inc.max())),
+            'max_dls_deg_30m': float(m.get('max_dls_deg_30m', path.DLS.max())), 'max_build_rate_deg_30m': float(m.get('max_build_rate_deg_30m', 0.0)),
+            'max_turn_rate_deg_30m': float(m.get('max_turn_rate_deg_30m', 0.0)), 'kop_md_m': float(m.get('kop_md_m', 0.0)), 'stations': int(len(path)),
+            'validation_status': (val or {}).get('status')}
+
+
 def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
                                 max_inclination_deg: float = 70.0,
                                 max_dls_deg_30m: float = 3.0,
@@ -194,7 +212,10 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
                                 seed: int = 7,
                                 kb_m: float | None = None,
                                 min_kop_md_m: float | None = None,
-                                max_kop_md_m: float | None = None) -> tuple[pd.DataFrame, dict]:
+                                max_kop_md_m: float | None = None,
+                                section_reoptimize: bool = True,
+                                section_time_budget_s: float = 20.0,
+                                section_max_md_increase_pct: float = 10.0) -> tuple[pd.DataFrame, dict]:
     """Optimize a free-form, piecewise directional trajectory to ordered targets.
 
     Distances are metres. Inclination and azimuth are control values interpolated along MD (control
@@ -262,8 +283,8 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
     def collision_penalty(path):
         if not prepared:
             return 0.0
-        pts = np.column_stack([path['Northing'].to_numpy(float), path['Easting'].to_numpy(float), path['TVD'].to_numpy(float)]) + shift
-        md = path['MD'].to_numpy(float); total = 0.0
+        pts = np.column_stack([_arr(path, 'Northing'), _arr(path, 'Easting'), _arr(path, 'TVD')]) + shift
+        md = _arr(path, 'MD'); total = 0.0
         for off in prepared:
             d, omd = _polyline_distance(pts, off['pts'], off['md'])
             sig = np.sqrt(2.0 * s_surface ** 2 + (md * theta) ** 2 + (omd * theta) ** 2)
@@ -290,7 +311,8 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         s = mds / end_md
         inc = np.interp(s, frac, inc_c)
         azi = np.degrees(np.interp(s, frac, np.unwrap(np.radians(azi_c)))) % 360.0
-        return minimum_curvature(pd.DataFrame({'MD': mds, 'Inc': inc, 'Azi': azi}), dls_interval=30.0)
+        n_, e_, z_, d_ = mc_core(mds, inc, azi, 30.0)    # numpy kernel: identical numbers, ~15x cheaper than a validated DataFrame call
+        return {'MD': mds, 'Inc': inc, 'Azi': azi, 'Northing': n_, 'Easting': e_, 'TVD': z_, 'DLS': d_}
 
     def bounds_for(N):
         b = [(lo_z, float(max_md_m))] + [(0.0, float(max_inclination_deg))] * (N - 1) + [(final_bearing - 180.0, final_bearing + 180.0)] * N
@@ -314,18 +336,63 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         out = []
         imax = float(max_inclination_deg)
         base_az = np.full(N, final_bearing)
-        if len(targets) > 1:                                  # bearing steers through the ordered targets
+        if len(targets) > 1:                                  # bearings steer through the ordered targets
             pts = [(0.0, 0.0)] + [(float(t['north_m']), float(t['east_m'])) for t in targets]
             legs = [_bearing(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) for i in range(len(pts) - 1)]
-            frac_leg = np.linspace(0.35, 0.85, len(legs))
             unwrapped = np.degrees(np.unwrap(np.radians(legs)))
-            base_az = np.interp(fr, np.concatenate(([0.0], frac_leg)), np.concatenate(([unwrapped[0]], unwrapped)))
+            # Build several distinct target-directed azimuth schedules. A single
+            # generic schedule can steer toward the final target too early and
+            # trap a local optimizer in a basin that misses an earlier waypoint.
+            depth_marks = np.asarray([max(1.0, float(t.get('tvd_m', 0.0))) for t in targets], dtype=float)
+            if depth_marks.size and depth_marks[-1] > 0:
+                raw_depth_fracs = np.clip(depth_marks / max(float(final['tvd_m']), 1.0), 0.12, 0.94)
+                # Keep interpolation knots strictly increasing even for targets at
+                # similar TVDs or targets whose TVD ordering is non-monotonic.
+                index_fracs = np.linspace(0.25, 0.88, len(targets))
+                depth_fracs = np.maximum.accumulate(0.65 * raw_depth_fracs + 0.35 * index_fracs)
+                for j in range(1, len(depth_fracs)):
+                    depth_fracs[j] = max(depth_fracs[j], depth_fracs[j - 1] + 0.015)
+                if depth_fracs[-1] > 0.96:
+                    depth_fracs = np.linspace(0.25, 0.92, len(targets))
+            else:
+                depth_fracs = np.linspace(0.3, 0.85, len(targets))
+            fallback_fracs = np.linspace(0.35, 0.85, len(legs))
+            # First schedule follows the approximate depth of each required target;
+            # other schedules deliberately delay/advance the turns to diversify starts.
+            for shift_frac in (0.0, -0.12, 0.12):
+                marks = np.clip(depth_fracs + shift_frac, 0.08, 0.96)
+                x_marks = np.concatenate(([0.0], marks))
+                y_marks = np.concatenate(([unwrapped[0]], unwrapped))
+                if len(x_marks) > 1:
+                    base_az = np.interp(fr, x_marks, y_marks)
+                    # Keep the schedules distinct; optimizer can refine them afterward.
+                    if shift_frac == 0.0:
+                        target_azimuth_schedules = [base_az.copy()]
+                    else:
+                        target_azimuth_schedules.append(base_az.copy())
+            if 'target_azimuth_schedules' not in locals() or not target_azimuth_schedules:
+                target_azimuth_schedules = [np.interp(fr, np.concatenate(([0.0], fallback_fracs)),
+                    np.concatenate(([unwrapped[0]], unwrapped))) ]
+        else:
+            target_azimuth_schedules = [base_az.copy()]
         for peak in sorted({min(imax, 65.0), min(imax, 45.0), min(imax, 30.0), min(imax, 80.0)}, reverse=True):
             ramp = np.linspace(0.0, peak, N)[1:]
             jprof = (peak * np.clip((fr - 0.12) / 0.30, 0.0, 1.0))[1:]
             for inc_c in (ramp, jprof):
                 for md_scale in (1.0, 1.4):
-                    out.append(np.concatenate(([min(max_md_m, max(lo_z, est_md * md_scale))], inc_c, base_az, np.ones(N - 1) if adaptive else [])))
+                    for az_schedule in target_azimuth_schedules:
+                        out.append(np.concatenate(([min(max_md_m, max(lo_z, est_md * md_scale))], inc_c, az_schedule, np.ones(N - 1) if adaptive else [])))
+        # KOP-aware patterns: stay vertical until the (minimum) KOP, then build - and a build-hold-build variant.
+        kop_fracs = {0.12, 0.25}
+        if min_kop_md_m:
+            kop_fracs |= {min(0.8, 1.05 * float(min_kop_md_m) / max(est_md, 1.0)), min(0.8, 1.35 * float(min_kop_md_m) / max(est_md, 1.0))}
+        for kf in sorted(kop_fracs):
+            for peak in sorted({min(imax, 60.0), min(imax, 40.0)}, reverse=True):
+                for width in (0.25, 0.5):
+                    delayed = (peak * np.clip((fr - kf) / width, 0.0, 1.0))[1:]
+                    bhb = delayed + 0.35 * peak * np.clip((fr - (kf + width + 0.12)) / 0.3, 0.0, 1.0)[1:]
+                    for inc_c in (delayed, np.minimum(bhb, min(imax, 85.0))):
+                        out.append(np.concatenate(([min(max_md_m, max(lo_z, est_md * 1.15))], inc_c, target_azimuth_schedules[0], np.ones(N - 1) if adaptive else [])))
         if prepared:                                          # swing left/right of the offsets early, then return
             for sgn in (1.0, -1.0):
                 for amp in (20.0, 45.0, 80.0):
@@ -341,16 +408,34 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         return out
 
     # ---- evaluation ---------------------------------------------------------------------------
-    def target_metrics(path):
+    def is_point(t):
+        return str((t.get('geometry') or t).get('type', 'Point')).lower() == 'point'
+    has_point = any(is_point(t) for t in targets)
+
+    def target_metrics(path, exact=False):
         results = []; previous_md = -1.0
         for index, t in enumerate(targets):
             tol_lat, tol_vert = target_tolerances(t, target_tolerance_m)
+            if exact and is_point(t):
+                # continuous closest approach on the arcs (3-D distance); no engineering radius
+                pr = closest_point_on_path(path, [float(t['north_m']), float(t['east_m']), float(t['tvd_m'])], start_md=previous_md,
+                                           endpoint_only=(index == len(targets) - 1))
+                if pr is None:
+                    results.append({'name': str(t.get('name', 'Target')), 'intercept_md_m': float('nan'), 'lateral_error_m': 1e6, 'vertical_error_m': 1e6,
+                                    'miss_distance_m': 1e6, 'within_tolerance': False, 'in_order': False, 'vertical_tolerance_m': POINT_NUMERIC_TOL_M,
+                                    'approach_constraints_pass': False, 'approach_azimuth_error_deg': 0.0, 'approach_inclination_error_deg': 0.0, 'plane_intersection_angle_deg': 0.0})
+                    continue
+                md = pr['md']; approach = _approach_metrics(path, md, t)
+                results.append({'name': str(t.get('name', 'Target')), 'intercept_md_m': float(md), 'lateral_error_m': pr['lateral_m'], 'vertical_error_m': pr['vertical_m'],
+                                'miss_distance_m': pr['distance_m'], 'within_tolerance': bool(pr['distance_m'] <= POINT_NUMERIC_TOL_M), 'in_order': True,
+                                'vertical_tolerance_m': POINT_NUMERIC_TOL_M, 'exact_point_target': True, **approach})
+                previous_md = md
+                continue
             if index == len(targets) - 1:
-                end = path.iloc[-1]
-                lat = math.hypot(float(end.Northing) - float(t['north_m']), float(end.Easting) - float(t['east_m']))
-                vert = _plane_residual(float(end.Northing), float(end.Easting), float(end.TVD), t)
-                miss = float(footprint_miss(t, [float(end.Northing)], [float(end.Easting)], target_tolerance_m)[0])
-                md = float(end.MD)
+                eN, eE, eZ, md = float(_arr(path, 'Northing')[-1]), float(_arr(path, 'Easting')[-1]), float(_arr(path, 'TVD')[-1]), float(_arr(path, 'MD')[-1])
+                lat = math.hypot(eN - float(t['north_m']), eE - float(t['east_m']))
+                vert = _plane_residual(eN, eE, eZ, t)
+                miss = float(footprint_miss(t, [eN], [eE], target_tolerance_m)[0])
             else:
                 lat, vert, md, miss = _oriented_target_residual(path, t, target_tolerance_m)
             in_order = md > previous_md + 1e-3
@@ -362,22 +447,36 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
             previous_md = md
         return results
 
-    def evaluate(x, N):
+    def evaluate(x, N, exact=False):
         path = make_path(x, N)
-        inc = path.Inc.to_numpy(float); azi = np.unwrap(np.radians(path.Azi.to_numpy(float)))
-        md = path.MD.to_numpy(float); dmd = np.maximum(np.diff(md), 1e-9)
-        dls = path.DLS.to_numpy(float)[1:]
+        inc = _arr(path, 'Inc'); azi = np.unwrap(np.radians(_arr(path, 'Azi')))
+        md = _arr(path, 'MD'); dmd = np.maximum(np.diff(md), 1e-9)
+        dls = _arr(path, 'DLS')[1:]
         build = np.abs(np.diff(inc)) / dmd * 30.0
         turn = np.abs(np.degrees(np.diff(azi))) / dmd * 30.0
-        results = target_metrics(path)
+        results = target_metrics(path, exact=exact and has_point)
         score = 0.0
         center_dist = results[-1]['lateral_error_m']; depth_err = abs(results[-1]['vertical_error_m'])
         score += 100.0 * center_dist ** 2 + 100.0 * depth_err ** 2 + 0.02 * float(x[0])
-        for r, t in zip(results, targets):
+        sequence_misses = []
+        for target_index, (r, t) in enumerate(zip(results, targets)):
             tol_vert = r['vertical_tolerance_m']
-            score += 1e5 * max(0.0, r['miss_distance_m']) ** 2 + 1e5 * max(0.0, abs(r['vertical_error_m']) - tol_vert) ** 2
+            # Required targets are lexicographically prioritized: missing an early
+            # target is more expensive than a comparable miss at a later target.
+            # This is still a penalty-based search, so independent validation remains
+            # the only acceptance gate.
+            sequence_weight = float((len(targets) - target_index) ** 2)
+            lateral_miss = max(0.0, float(r['miss_distance_m']))
+            vertical_miss = max(0.0, abs(float(r['vertical_error_m'])) - tol_vert)
+            sequence_misses.append(max(lateral_miss, vertical_miss))
+            score += sequence_weight * 1e8 * lateral_miss ** 2
+            score += sequence_weight * 1e8 * vertical_miss ** 2
             if not r['in_order']:
-                score += 1e9
+                score += 1e12 * (target_index + 1)
+        if sequence_misses:
+            # Strongly discourage sacrificing any required waypoint to improve the
+            # terminal objective, especially the first target in the sequence.
+            score += 1e8 * max(sequence_misses) ** 2
             if not r['approach_constraints_pass']:
                 score += 1e5 * (r['approach_azimuth_error_deg'] ** 2 + r['approach_inclination_error_deg'] ** 2 + 100.0)
                 if t.get('intersection_angle_enabled'):
@@ -388,19 +487,25 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         score += 1e5 * float(np.sum(np.maximum(0.0, build - max_build_rate_deg_30m * margin) ** 2))
         score += 1e5 * float(np.sum(np.maximum(0.0, turn - max_turn_rate_deg_30m * margin) ** 2))
         score += 1e5 * float(np.sum(np.maximum(0.0, inc - max_inclination_deg * margin) ** 2))
+        _k = int(np.argmax(inc > 0.5)) if (inc > 0.5).any() else None           # same definition as the validator: last vertical station
+        kop_md = float((md[_k - 1] if _k else md[0]) if _k is not None else md[-1])
+        kop_bad = False
         if min_kop_md_m is not None:
-            first_build = md[np.argmax(inc > 0.5)] if (inc > 0.5).any() else md[-1]
-            score += 1e5 * max(0.0, float(min_kop_md_m) - float(first_build)) ** 2
+            score += 1e5 * max(0.0, float(min_kop_md_m) - kop_md) ** 2
+            kop_bad = kop_bad or kop_md < float(min_kop_md_m) - 1e-3
+        if max_kop_md_m is not None:
+            score += 1e5 * max(0.0, kop_md - float(max_kop_md_m)) ** 2
+            kop_bad = kop_bad or kop_md > float(max_kop_md_m) + 1e-3
         score += 0.02 * float(np.sum(np.diff(inc, n=2) ** 2) + np.sum(np.diff(azi, n=2) ** 2) * 100.0)
         score += 2.0 * float(np.mean(dls ** 2)) if len(dls) else 0.0   # prefer gentler curvature among feasible shapes
         score += 1e5 * collision_penalty(path)
         viol = (not all(r['within_tolerance'] and r['in_order'] for r in results)) or dls.max(initial=0) > max_dls_deg_30m + 1e-3 \
             or build.max(initial=0) > max_build_rate_deg_30m + 1e-3 or turn.max(initial=0) > max_turn_rate_deg_30m + 1e-3 \
-            or inc.max() > max_inclination_deg + 1e-3 or not all(r['approach_constraints_pass'] for r in results)
+            or inc.max() > max_inclination_deg + 1e-3 or not all(r['approach_constraints_pass'] for r in results) or kop_bad
         return {'score': float(score), 'path': path, 'results': results, 'station_ok': not viol}
 
     def run_validation(path):
-        return validate_trajectory(path[['MD', 'Inc', 'Azi']], targets=targets, constraints=constraints, offsets=offsets,
+        return validate_trajectory(pd.DataFrame({k: _arr(path, k) for k in ('MD', 'Inc', 'Azi')}), targets=targets, constraints=constraints, offsets=offsets,
                                    surface_easting_m=surface_easting_m, surface_northing_m=surface_northing_m, kb_m=kb_m,
                                    survey_error_model=sigma, required_separation_factor=required_separation_factor,
                                    default_target_tolerance_m=target_tolerance_m)
@@ -412,13 +517,85 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         b = bnds or bounds_for(N)
         def f(u):
             try:
-                return evaluate(u * sc, N)['score']
+                return evaluate(u * sc, N)['score']          # chord-level (fast) inside the search
             except Exception:
                 return 1e15
         res = minimize(f, np.asarray(x0, float) / sc, method='L-BFGS-B', bounds=[(lo_ / k, hi_ / k) for (lo_, hi_), k in zip(b, sc)],
                        options={'maxiter': int(iters), 'ftol': 1e-12, 'gtol': 1e-8, 'maxls': 30})
         res.x = res.x * sc
         return res
+
+    def exact_polish(x0, N, iters=80):
+        """Closure step: least-squares on the exact (arc) point-target residuals, minimal change to the design.
+
+        Residuals are (path - target) components at the continuous closest approach for every point target, plus
+        hinge terms for rate/inclination limits and a weak pull toward the starting design. Point targets are
+        driven to floating-point closure; non-point targets contribute only footprint/vertical excess.
+        """
+        sc = np.array([100.0] + [10.0] * (N - 1) + [30.0] * N + ([1.0] * (N - 1) if adaptive else []))
+        b = bounds_for(N); lo = np.array([bb[0] for bb in b]) / sc; hi = np.array([bb[1] for bb in b]) / sc
+        u0 = np.clip(np.asarray(x0, float) / sc, lo, hi)
+
+        def resid(u):
+            path = make_path(u * sc, N); res = []; prev = -1.0
+            for index, t in enumerate(targets):
+                last = index == len(targets) - 1
+                if is_point(t):
+                    pr = closest_point_on_path(path, [float(t['north_m']), float(t['east_m']), float(t['tvd_m'])], start_md=prev, endpoint_only=last)
+                    if pr is None:
+                        res += [1e3, 1e3, 1e3]; continue
+                    res += [pr['d_north'], pr['d_east'], pr['d_tvd']]; prev = pr['md']
+                else:
+                    if last:
+                        eN, eE, eZ, md_t = (float(_arr(path, c)[-1]) for c in ('Northing', 'Easting', 'TVD', 'MD'))
+                        miss = float(footprint_miss(t, [eN], [eE], target_tolerance_m)[0]); vert = _plane_residual(eN, eE, eZ, t)
+                    else:
+                        _, vert, md_t, miss = _oriented_target_residual(path, t, target_tolerance_m)
+                    res += [miss, max(0.0, abs(vert) - target_tolerances(t, target_tolerance_m)[1])]; prev = md_t
+            inc = _arr(path, 'Inc'); azi = np.unwrap(np.radians(_arr(path, 'Azi'))); md = _arr(path, 'MD'); dmd = np.maximum(np.diff(md), 1e-9)
+            res += list(10.0 * np.maximum(0.0, _arr(path, 'DLS')[1:] - max_dls_deg_30m * 0.999))
+            res += list(10.0 * np.maximum(0.0, np.abs(np.diff(inc)) / dmd * 30.0 - max_build_rate_deg_30m * 0.999))
+            res += list(10.0 * np.maximum(0.0, np.abs(np.degrees(np.diff(azi))) / dmd * 30.0 - max_turn_rate_deg_30m * 0.999))
+            res += list(10.0 * np.maximum(0.0, inc - max_inclination_deg * 0.999))
+            res += list(0.02 * (u - u0))
+            return np.asarray(res, float)
+        try:
+            sol = least_squares(resid, u0, bounds=(lo, hi), method='trf', xtol=1e-14, ftol=1e-14, gtol=1e-14, max_nfev=int(iters))
+            return sol.x * sc
+        except Exception:
+            return np.asarray(x0, float)
+
+    def settle(x, N):
+        """Exact-mode evaluation; if a point target is not yet closed, apply the closure step and keep it if better."""
+        ev = evaluate(x, N, exact=True)
+        if has_point and not ev['station_ok']:
+            worst = max((r['miss_distance_m'] for r in ev['results'] if not r['within_tolerance']), default=0.0)
+            if worst < 250.0:
+                xp = exact_polish(x, N); evp = evaluate(xp, N, exact=True)
+                if evp['station_ok'] or evp['score'] < ev['score']:
+                    return evp, xp
+        return ev, np.asarray(x, float)
+
+    def target_vectors(path):
+        """Constraint vectors for the Stage-2 section optimizer (exact point equalities, areal margins, centre preference)."""
+        eq = []; ineq = []; pen = 0.0; prev = -1.0
+        for index, t in enumerate(targets):
+            last = index == len(targets) - 1
+            if is_point(t):
+                pr = closest_point_on_path(path, [float(t['north_m']), float(t['east_m']), float(t['tvd_m'])], start_md=prev, endpoint_only=last)
+                if pr is None:
+                    eq += [1e3, 1e3, 1e3]; continue
+                eq += [pr['d_north'], pr['d_east'], pr['d_tvd']]; prev = pr['md']
+            else:
+                if last:
+                    eN, eE, eZ, md_t = (float(_arr(path, c)[-1]) for c in ('Northing', 'Easting', 'TVD', 'MD'))
+                    miss = float(footprint_miss(t, [eN], [eE], target_tolerance_m)[0]); vert = _plane_residual(eN, eE, eZ, t)
+                    lat = math.hypot(eN - float(t['north_m']), eE - float(t['east_m']))
+                else:
+                    lat, vert, md_t, miss = _oriented_target_residual(path, t, target_tolerance_m)
+                tv = target_tolerances(t, target_tolerance_m)[1]
+                ineq += [-miss, 0.9 * tv - abs(vert)]; pen += 0.02 * lat ** 2; prev = md_t
+        return eq, ineq, pen
 
     def over_budget():
         return (time.time() - t_start) > float(time_budget_s)
@@ -441,19 +618,41 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
             except Exception:
                 continue
         scored.sort(key=lambda p: p[0])
-        starts = [x for _, x in scored[:3]]
-        stage_best = None
-        for x0 in starts:                                   # compare every start: the first feasible one is rarely the best
+        # More independent starts improve recovery when an early mandatory target
+        # is missed by the first local basin. The wall-clock budget still governs
+        # how many solves can actually run.
+        starts = [x for _, x in scored[:6]]
+        stage_best = None; n_feasible = 0
+        for x0 in starts:                                   # compare starts, but stop once two feasible ones exist (Stage 2 reshapes the plan anyway)
             if over_budget() and stage_best is not None:
                 break
+            if n_feasible >= 2:
+                break
             res = local_solve(x0, N, maxiter); total_iters += int(getattr(res, 'nit', 0)); total_solves += 1
-            ev = evaluate(res.x, N)
+            ev, xs = settle(res.x, N); res.x = xs
             better = stage_best is None or (ev['station_ok'] and not stage_best[0]['station_ok']) or \
                 (ev['station_ok'] == stage_best[0]['station_ok'] and ev['score'] < stage_best[0]['score'])
+            n_feasible += int(ev['station_ok'])
             if better:
                 stage_best = (ev, res.x, res)
         if stage_best is None:
             continue
+        if not stage_best[0]['station_ok'] and not over_budget():
+            # Bounded recovery: nudge inclination/azimuth of the best infeasible design inside the variable bounds and re-solve.
+            rng_n = np.random.default_rng(seed + 17 * N); b_n = bounds_for(N)
+            for scale in (0.5, 1.0, 1.6, 2.4):
+                if over_budget(): break
+                xn = np.asarray(stage_best[1], float).copy()
+                xn[1:N] += rng_n.normal(0.0, 4.0 * scale, N - 1)           # inclination nudge (deg)
+                xn[N:2 * N] += rng_n.normal(0.0, 8.0 * scale, N)           # azimuth nudge (deg)
+                xn[0] *= 1.0 + rng_n.normal(0.0, 0.06 * scale)             # MD nudge
+                xn = np.array([min(max(v, lo_), hi_) for v, (lo_, hi_) in zip(xn, b_n)])
+                resn = local_solve(xn, N, maxiter); total_iters += int(getattr(resn, 'nit', 0)); total_solves += 1
+                evn, xsn = settle(resn.x, N); resn.x = xsn
+                if (evn['station_ok'] and not stage_best[0]['station_ok']) or (evn['station_ok'] == stage_best[0]['station_ok'] and evn['score'] < stage_best[0]['score']):
+                    stage_best = (evn, resn.x, resn)
+                if stage_best[0]['station_ok']:
+                    break
         ev, x_best, res = stage_best
         history.append({'control_points': N, 'objective': ev['score'], 'station_level_feasible': ev['station_ok']})
         if ev['score'] < best['score']:
@@ -466,7 +665,7 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
                     set(val['violations']) <= {'anti_collision_review_required', 'anti_collision_cross_check'}:
                 safety['value'] *= 1.5; tries += 1               # wider internal buffer, then re-solve from the best point
                 res2 = local_solve(x_best, N, maxiter); total_iters += int(getattr(res2, 'nit', 0)); total_solves += 1
-                ev = evaluate(res2.x, N); x_best, res = res2.x, res2
+                ev, xs = settle(res2.x, N); res2.x = xs; x_best, res = xs, res2
                 if not ev['station_ok']:
                     break
                 val = run_validation(ev['path'])
@@ -476,10 +675,25 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
             if ev['score'] < best['score']:
                 best = {'score': ev['score'], 'x': x_best, 'N': N, 'res': res, 'ev': ev}
 
+    # ---- Stage 2: section reconstruction + re-optimisation (only from a validated Stage-1 plan) ------------
+    section_result = {'attempted': False, 'status': 'NOT_ATTEMPTED_INFEASIBLE_BASE' if accepted is None else 'NOT_REQUESTED'}
+    baseline_metrics = None
+    if accepted is not None:
+        stage1_df = minimum_curvature(pd.DataFrame({k: accepted['ev']['path'][k] for k in ('MD', 'Inc', 'Azi')}))
+        baseline_metrics = _path_summary(stage1_df, accepted['val'])
+        if section_reoptimize:
+            limits = {'max_inclination_deg': max_inclination_deg, 'max_dls_deg_30m': max_dls_deg_30m, 'max_build_rate_deg_30m': max_build_rate_deg_30m,
+                      'max_turn_rate_deg_30m': max_turn_rate_deg_30m, 'max_md_m': max_md_m, 'min_kop_md_m': min_kop_md_m}
+            section_result = reoptimize_sections(stage1_df, target_vectors=target_vectors, validate=run_validation, limits=limits, interval_m=station_interval_m,
+                                                 time_budget_s=section_time_budget_s, max_md_increase_pct=section_max_md_increase_pct)
+            if section_result.get('adopted'):
+                accepted = {**accepted, 'val': section_result['validation'], 'section_path': section_result['path']}
+
     # ---- challenger: one more control point (more shape freedom) may give a shorter / gentler plan.
     #      It replaces the simpler plan only if it validates AND wins after a complexity charge.
     complexity_charge = 3.0
-    if accepted is not None and adaptive and not over_budget():
+    stage2_adopted = bool(section_result.get('adopted'))
+    if accepted is not None and adaptive and not over_budget() and not stage2_adopted:
         bigger = [n for n in stages if n > accepted['N']]
         if bigger:
             N2 = bigger[0]
@@ -487,7 +701,7 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
                 cands = [resample_x(accepted['x'], accepted['N'], N2)] + seeds(N2)[:6]
                 sc = sorted(((evaluate(x, N2)['score'], x) for x in cands), key=lambda p: p[0])
                 res_c = local_solve(sc[0][1], N2, maxiter); total_iters += int(getattr(res_c, 'nit', 0)); total_solves += 1
-                ev_c = evaluate(res_c.x, N2)
+                ev_c, xc = settle(res_c.x, N2); res_c.x = xc
                 history.append({'control_points': N2, 'objective': ev_c['score'], 'station_level_feasible': ev_c['station_ok'], 'role': 'challenger'})
                 if ev_c['station_ok'] and ev_c['score'] + complexity_charge * N2 < accepted['ev']['score'] + complexity_charge * accepted['N'] - 1e-6:
                     v_c = run_validation(ev_c['path'])
@@ -498,10 +712,10 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
 
     # ---- continuation polish: more iterations on the accepted solution (shorter / smoother / nearer the
     #      target centre). Kept only if the independent validation still passes AND the objective improves.
-    if accepted is not None and not over_budget():
+    if accepted is not None and not over_budget() and not stage2_adopted:
         N = accepted['N']
         try:
-            res3 = local_solve(accepted['x'], N, int(maxiter) * 2); ev3 = evaluate(res3.x, N); total_iters += int(getattr(res3, 'nit', 0))
+            res3 = local_solve(accepted['x'], N, int(maxiter) * 2); ev3, x3 = settle(res3.x, N); res3.x = x3; total_iters += int(getattr(res3, 'nit', 0))
             if ev3['station_ok'] and ev3['score'] < accepted['ev']['score'] - 1e-6:
                 v3 = run_validation(ev3['path'])
                 if v3['status'] == STATUS_PASS:
@@ -512,17 +726,17 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
     if skip_search:                                       # proven infeasible: still return a best-effort candidate for review
         N = int(control_points); x0 = seeds(N)[0]
         try:
-            res0 = local_solve(x0, N, 25); best = {'x': res0.x, 'N': N, 'res': res0, 'ev': evaluate(res0.x, N), 'score': 0.0}
+            res0 = local_solve(x0, N, 25); best = {'x': res0.x, 'N': N, 'res': res0, 'ev': evaluate(res0.x, N, exact=True), 'score': 0.0}
         except Exception:
             pass
     # ---- result assembly ----------------------------------------------------------------------
     if accepted is not None:
         chosen = accepted; val = accepted['val']; ev = accepted['ev']
-        path = ev['path']
+        path = minimum_curvature(accepted['section_path'] if 'section_path' in accepted else pd.DataFrame({k: ev['path'][k] for k in ('MD', 'Inc', 'Azi')}))      # full column set for callers
     else:
         if 'x' not in best:                                  # nothing evaluated (proven infeasible / no time)
-            N = int(control_points); x0 = seeds(N)[0]; ev = evaluate(x0, N); best = {'x': x0, 'N': N, 'ev': ev, 'res': None}
-        chosen = best; ev = best['ev']; path = ev['path']
+            N = int(control_points); x0 = seeds(N)[0]; ev = evaluate(x0, N, exact=True); best = {'x': x0, 'N': N, 'ev': ev, 'res': None}
+        chosen = best; ev = best['ev']; path = minimum_curvature(pd.DataFrame({k: ev['path'][k] for k in ('MD', 'Inc', 'Azi')}))
         val = run_validation(path)
     outcome = search_outcome(val, search_completed=not over_budget(), proven_infeasible=bool(screen['proven_infeasible']))
     feasible = outcome['status'] == STATUS_PASS
@@ -534,17 +748,41 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
             path = truncate_trajectory_at_md(path, float(target_results[-1]['intercept_md_m']))
         except ValueError:
             pass
-    # display window for failed candidates: ~100 ft beyond the relevant target approach (display only)
+    # Single-target failures can be clipped near their approach for readability.
+    # For multi-target failures, retain the full best-effort candidate so the user
+    # can inspect why a later target was not reached; do not visually imply that
+    # the well plan physically terminates at the first failed target.
     clip_md = None
-    if not feasible and target_results:
+    if not feasible and len(targets) == 1 and target_results:
         bad = next((r for r in target_results if not (r.get('within_tolerance') and r.get('in_order'))), target_results[-1])
         if bad.get('intercept_md_m') is not None and np.isfinite(bad['intercept_md_m']):
             clip_md = float(bad['intercept_md_m']) + 30.48
     collision_rows = val.get('collision', [])
     checks_public = [{k: v for k, v in c.items()} for c in val['checks']]
     res_obj = chosen.get('res')
+    if section_result.get('adopted'):
+        section_schedule = []
+        md_arr = path.MD.to_numpy(float); dls_arr = path.DLS.to_numpy(float)
+        for row in section_result['schedule']:
+            sel = (md_arr > row['start_md_m'] + 1e-6) & (md_arr <= row['end_md_m'] + 1e-6)
+            section_schedule.append({**row, 'max_dls_deg_30m': float(dls_arr[sel].max()) if sel.any() else 0.0})
+        sec_status = 'REOPTIMIZED'
+    else:
+        section_schedule = build_section_schedule(path, max_dls_deg_30m=max_dls_deg_30m)
+        sec_status = section_result.get('status') if feasible else 'NOT_ATTEMPTED_INFEASIBLE_BASE'
+        if feasible and not section_reoptimize:
+            sec_status = 'CLASSIFIED_ONLY'
+    section_check = validate_section_schedule(section_schedule, max_dls_deg_30m=max_dls_deg_30m, max_build_rate_deg_30m=max_build_rate_deg_30m, max_turn_rate_deg_30m=max_turn_rate_deg_30m)
+    final_metrics = _path_summary(path, val)
     meta = {
         'planner': 'General control-point trajectory optimizer (engineering-development)',
+        'section_schedule': section_schedule,
+        'section_reconstruction_status': sec_status,
+        'section_reconstruction_note': section_result.get('message') or ('Sections are classified from the accepted trajectory; no re-optimization was requested.' if sec_status == 'CLASSIFIED_ONLY' else 'Stage 2 was not run because no validated Stage-1 trajectory exists.'),
+        'section_reoptimization': {k: v for k, v in section_result.items() if k in ('attempted', 'adopted', 'status', 'attempts', 'seconds', 'md_change_pct', 'mode')},
+        'stage1_metrics': baseline_metrics, 'final_metrics': final_metrics,
+        'final_trajectory_source': 'section parameters (Stage 2)' if section_result.get('adopted') else ('Stage-1 control-point trajectory' if feasible else 'best-effort candidate (not valid)'),
+        'section_schedule_constraint_check': section_check,
         'optimizer': 'Multi-seed SciPy L-BFGS-B penalty refinement with adaptive variable-inclination/azimuth control points, validated by core.validation',
         'optimization_status': outcome['optimization_status'],
         'status': outcome['status'],

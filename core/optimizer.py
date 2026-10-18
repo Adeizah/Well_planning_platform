@@ -29,49 +29,33 @@ def _target_residual(path, target_tvd_m, target_north_m, target_east_m, target_g
     if len(tvd) == 0:
         return 1e9, 1e9, 1e9, 1e9
 
-    candidates = []
-    def add_candidate(n, e, v, md):
-        lat = math.hypot(float(n) - target_north_m, float(e) - target_east_m)
-        miss = _shape_miss(float(n), float(e), lat, target_geometry, point_tolerance_m)
-        # Target-plane adherence is a hard design requirement; the miss term
-        # measures distance outside the permitted footprint.
-        # Once inside a target footprint, distance-to-boundary is zero everywhere.
-        # Retain a small centre-distance tie-breaker so optimization does not
-        # treat an edge hit as equally desirable as a centre hit.
-        vertical_error = abs(float(v) - target_tvd_m)
-        # A point outside the allowed target-depth band must not outrank an
-        # actual target-plane crossing merely because its horizontal position is closer.
-        vertical_penalty = 4.0 * vertical_error + 100.0 * max(0.0, vertical_error - point_tolerance_m)
-        score = miss + 0.35 * lat + vertical_penalty
-        candidates.append((score, lat, float(v) - target_tvd_m, float(md), miss))
-
-    for i in range(len(tvd)):
-        add_candidate(north[i], east[i], tvd[i], md_values[i])
-
-    for i in range(len(tvd) - 1):
-        n0, n1 = north[i], north[i + 1]
-        e0, e1 = east[i], east[i + 1]
-        v0, v1 = tvd[i], tvd[i + 1]
-        m0, m1 = md_values[i], md_values[i + 1]
-        dn, de = n1 - n0, e1 - e0
-        denom = dn * dn + de * de
-        # Point on this segment closest to the target in horizontal projection.
-        fxy = 0.0 if denom < 1e-15 else max(0.0, min(1.0,
-            ((target_north_m - n0) * dn + (target_east_m - e0) * de) / denom))
-        add_candidate(n0 + fxy * dn, e0 + fxy * de,
-                      v0 + fxy * (v1 - v0), m0 + fxy * (m1 - m0))
-        # Exact TVD crossing, when the segment crosses the target plane.
-        if (v0 - target_tvd_m) * (v1 - target_tvd_m) <= 0 and abs(v1 - v0) > 1e-12:
-            fz = max(0.0, min(1.0, (target_tvd_m - v0) / (v1 - v0)))
-            add_candidate(n0 + fz * dn, e0 + fz * de, target_tvd_m,
-                          m0 + fz * (m1 - m0))
-        # If a segment is essentially horizontal and lies close to target TVD,
-        # its lateral projection is already evaluated above. This is the key case
-        # that first-crossing-only logic missed.
-
-    best = min(candidates, key=lambda item: item[0])
-    _, lat, vert, md, miss = best
-    return float(lat), float(vert), float(md), float(miss)
+    # Vectorised candidate set (identical candidates and ORDER to the former per-point loop, so ties break the same way):
+    # all stations first, then for each segment its horizontal-projection point followed by its exact target-TVD crossing (if any).
+    n0, n1 = north[:-1], north[1:]; e0, e1 = east[:-1], east[1:]
+    v0, v1 = tvd[:-1], tvd[1:]; m0, m1 = md_values[:-1], md_values[1:]
+    dn, de = n1 - n0, e1 - e0
+    denom = dn * dn + de * de
+    fxy = np.where(denom < 1e-15, 0.0, np.clip(((target_north_m - n0) * dn + (target_east_m - e0) * de) / np.where(denom < 1e-15, 1.0, denom), 0.0, 1.0))
+    crosses = ((v0 - target_tvd_m) * (v1 - target_tvd_m) <= 0) & (np.abs(v1 - v0) > 1e-12)
+    fz = np.clip((target_tvd_m - v0) / np.where(np.abs(v1 - v0) > 1e-12, v1 - v0, 1.0), 0.0, 1.0)
+    seg_n = np.stack([n0 + fxy * dn, n0 + fz * dn], axis=1); seg_e = np.stack([e0 + fxy * de, e0 + fz * de], axis=1)
+    seg_v = np.stack([v0 + fxy * (v1 - v0), np.full_like(v0, target_tvd_m)], axis=1); seg_m = np.stack([m0 + fxy * (m1 - m0), m0 + fz * (m1 - m0)], axis=1)
+    keep = np.stack([np.ones_like(crosses), crosses], axis=1).ravel()
+    cn = np.concatenate([north, seg_n.ravel()[keep]]); ce = np.concatenate([east, seg_e.ravel()[keep]])
+    cv = np.concatenate([tvd, seg_v.ravel()[keep]]); cm = np.concatenate([md_values, seg_m.ravel()[keep]])
+    lat = np.hypot(cn - target_north_m, ce - target_east_m)
+    typ = str((target_geometry or {}).get('type', 'Point')).lower()
+    if not target_geometry or typ == 'point':
+        miss = np.maximum(0.0, lat - float(point_tolerance_m))
+    else:
+        miss = np.array([_shape_miss(float(n_), float(e_), float(l_), target_geometry, point_tolerance_m) for n_, e_, l_ in zip(cn, ce, lat)])
+    # Target-plane adherence is a hard design requirement; the miss term measures distance outside the permitted footprint.
+    # A small centre-distance tie-breaker keeps an edge hit from ranking equal to a centre hit; a point outside the allowed
+    # depth band must not outrank a real target-plane crossing merely because its horizontal position is closer.
+    verr = np.abs(cv - target_tvd_m)
+    score = miss + 0.35 * lat + 4.0 * verr + 100.0 * np.maximum(0.0, verr - point_tolerance_m)
+    k = int(np.argmin(score))
+    return float(lat[k]), float(cv[k] - target_tvd_m), float(cm[k]), float(miss[k])
 
 
 def _shape_miss(north, east, center_distance, target_geometry=None, point_tolerance_m=30.48):

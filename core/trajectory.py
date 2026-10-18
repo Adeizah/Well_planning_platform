@@ -26,6 +26,70 @@ def _ratio_factor(dog_rad):
     return out
 
 
+def mc_core(md, inc_deg, azi_deg, dls_interval=30.0, n0=0.0, e0=0.0, z0=0.0):
+    """Pure-numpy minimum-curvature kernel (no pandas, no validation).
+
+    This is the single implementation behind :func:`minimum_curvature`; the optimizers call it
+    directly because DataFrame construction/validation dominated their run time (thousands of
+    evaluations per search). Inputs must already be sorted, strictly increasing in MD, inc in 0-180.
+    Returns (north, east, tvd, dls) arrays; DLS is deg per ``dls_interval``.
+    """
+    md = np.asarray(md, dtype=float); inc_d = np.asarray(inc_deg, dtype=float); azi_d = np.asarray(azi_deg, dtype=float)
+    inc = np.radians(inc_d); azi = np.radians(azi_d)
+    dl = np.diff(md)
+    dog = np.radians(_dogleg(inc_d[:-1], azi_d[:-1], inc_d[1:], azi_d[1:]))
+    rf = _ratio_factor(dog)
+    si, ci = np.sin(inc), np.cos(inc)
+    h = dl / 2.0 * rf
+    dn = h * (si[:-1] * np.cos(azi[:-1]) + si[1:] * np.cos(azi[1:]))
+    de = h * (si[:-1] * np.sin(azi[:-1]) + si[1:] * np.sin(azi[1:]))
+    dz = h * (ci[:-1] + ci[1:])
+    north = n0 + np.concatenate(([0.0], np.cumsum(dn)))
+    east = e0 + np.concatenate(([0.0], np.cumsum(de)))
+    tvd = z0 + np.concatenate(([0.0], np.cumsum(dz)))
+    dls = np.concatenate(([0.0], np.degrees(dog) / dl * dls_interval))
+    return north, east, tvd, dls
+
+
+def lean_path(md, inc_deg, azi_deg, dls_interval=30.0):
+    """Minimal-overhead path frame (MD, Inc, Azi, Northing, Easting, TVD, DLS) for optimizer inner loops."""
+    n, e, z, d = mc_core(md, inc_deg, azi_deg, dls_interval)
+    return pd.DataFrame({"MD": md, "Inc": inc_deg, "Azi": azi_deg, "Northing": n, "Easting": e, "TVD": z, "DLS": d})
+
+
+def _minimum_curvature_fast(df, dls_interval, tie_in):
+    """Low-overhead path for the common case (exactly MD/Inc/Azi, numeric dtypes, already sorted).
+
+    Produces the same columns, dtypes, attrs and errors as the general path; anything unusual returns None so the
+    general (validating, sorting, type-coercing) path handles it.
+    """
+    try:
+        if any(df[c].dtype.kind not in "iuf" for c in df.columns):
+            return None
+        md = df["MD"].to_numpy(float); inc = df["Inc"].to_numpy(float); azi = df["Azi"].to_numpy(float)
+        if len(md) > 1 and not np.all(np.diff(md) >= 0):
+            return None
+        if not np.all(np.diff(md) > 0):
+            raise ValueError("MD must increase strictly.")
+        if not np.all((inc >= 0) & (inc <= 180)):
+            raise ValueError("Inclination must be between 0 and 180 degrees.")
+        ti = dict(tie_in or {}); assumed = False
+        if "tvd" not in ti:
+            ti["tvd"] = float(md[0]) if md[0] > 0 else 0.0; assumed = bool(md[0] > 0)
+        north, east, tvd, dls = mc_core(md, inc, azi, dls_interval, float(ti.get("north", 0.0)), float(ti.get("east", 0.0)), float(ti["tvd"]))
+    except ValueError:
+        raise
+    except Exception:
+        return None
+    data = {c: df[c].to_numpy() for c in df.columns}
+    vs = np.hypot(north, east)
+    data.update({"Northing": north, "Easting": east, "TVD": tvd, "DLS": dls, "VS": vs, "Closure": vs.copy(),
+                 "ClosureAzi": np.degrees(np.arctan2(east, north)) % 360.0})
+    out = pd.DataFrame(data)
+    out.attrs["tie_in_assumed"] = assumed
+    return out
+
+
 def minimum_curvature(df, dls_interval=30.0, tie_in=None):
     """Minimum-curvature positions for a survey (vectorised).
 
@@ -44,6 +108,9 @@ def minimum_curvature(df, dls_interval=30.0, tie_in=None):
     required = {"MD", "Inc", "Azi"}
     if not required.issubset(df.columns):
         raise ValueError("Survey requires MD, Inc and Azi columns.")
+    fast = _minimum_curvature_fast(df, dls_interval, tie_in) if (len(df.columns) == 3 and len(df) > 0) else None
+    if fast is not None:
+        return fast
     w = df.copy().sort_values("MD").reset_index(drop=True)
     for c in required:
         w[c] = pd.to_numeric(w[c], errors="raise")
@@ -54,25 +121,13 @@ def minimum_curvature(df, dls_interval=30.0, tie_in=None):
     if not w["Inc"].between(0, 180).all():
         raise ValueError("Inclination must be between 0 and 180 degrees.")
     md = w["MD"].to_numpy(float)
-    inc = np.radians(w["Inc"].to_numpy(float))
-    azi = np.radians(w["Azi"].to_numpy(float))
     ti = dict(tie_in or {})
     assumed = False
     if "tvd" not in ti:
         ti["tvd"] = float(md[0]) if md[0] > 0 else 0.0
         assumed = md[0] > 0
-    n0, e0, z0 = float(ti.get("north", 0.0)), float(ti.get("east", 0.0)), float(ti["tvd"])
-    dl = np.diff(md)
-    dog = np.radians(_dogleg(w["Inc"].to_numpy(float)[:-1], w["Azi"].to_numpy(float)[:-1],
-                             w["Inc"].to_numpy(float)[1:], w["Azi"].to_numpy(float)[1:]))
-    rf = _ratio_factor(dog)
-    dn = dl / 2.0 * (np.sin(inc[:-1]) * np.cos(azi[:-1]) + np.sin(inc[1:]) * np.cos(azi[1:])) * rf
-    de = dl / 2.0 * (np.sin(inc[:-1]) * np.sin(azi[:-1]) + np.sin(inc[1:]) * np.sin(azi[1:])) * rf
-    dz = dl / 2.0 * (np.cos(inc[:-1]) + np.cos(inc[1:])) * rf
-    north = n0 + np.concatenate(([0.0], np.cumsum(dn)))
-    east = e0 + np.concatenate(([0.0], np.cumsum(de)))
-    tvd = z0 + np.concatenate(([0.0], np.cumsum(dz)))
-    dls = np.concatenate(([0.0], np.degrees(dog) / dl * dls_interval))
+    north, east, tvd, dls = mc_core(md, w["Inc"].to_numpy(float), w["Azi"].to_numpy(float), dls_interval,
+                                    float(ti.get("north", 0.0)), float(ti.get("east", 0.0)), float(ti["tvd"]))
     out = w.copy()
     out["Northing"] = north; out["Easting"] = east; out["TVD"] = tvd; out["DLS"] = dls
     # NOTE: "VS" has always been the horizontal closure distance. It equals a true

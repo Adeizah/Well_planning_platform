@@ -27,6 +27,7 @@ import pandas as pd
 from core.geometry import target_boundary, target_contains, target_tolerances, DEFAULT_TOLERANCE_M
 from core.trajectory import minimum_curvature, interpolate_path
 from engineering.anti_collision import clearance_report
+from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M
 
 STATUS_PASS = "PASS"
 STATUS_REVIEW = "REVIEW"
@@ -66,7 +67,9 @@ def footprint_miss(target, north, east, default_tol=DEFAULT_TOLERANCE_M):
     cn, ce = float(target["north_m"]), float(target["east_m"])
     center = np.hypot(north - cn, east - ce)
     if not geom or str(geom.get("type", "Point")).lower() == "point":
-        return np.maximum(0.0, center - lat_tol)
+        # No engineering miss radius for point targets: miss is distance to the
+        # exact point. Numerical acceptance is handled separately by validator.
+        return center
     g = dict(geom); g.setdefault("north_m", cn); g.setdefault("east_m", ce)
     inside = np.array([target_contains(g, n, e) for n, e in zip(north, east)])
     bn, be = target_boundary(g)
@@ -82,7 +85,7 @@ def footprint_miss(target, north, east, default_tol=DEFAULT_TOLERANCE_M):
     return np.where(inside, 0.0, np.where(np.isfinite(best), best, center))
 
 
-def _dense(path, spacing_m=5.0):
+def _dense(path, spacing_m=0.5):
     mds = path["MD"].to_numpy(float)
     grid = np.arange(mds[0], mds[-1], spacing_m)
     return interpolate_path(path, np.unique(np.concatenate([grid, mds])))
@@ -107,6 +110,29 @@ def _approach(dense, target):
     return ok, azi_diff, inc_diff, plane_angle
 
 
+def _evaluate_point_target(dense, target, start_md, endpoint_only):
+    """Exact interception test for a point target: continuous closest approach on the arcs (3-D distance).
+
+    The only acceptance threshold is POINT_NUMERIC_TOL_M (floating-point closure), never an engineering radius.
+    """
+    tgt = [float(target["north_m"]), float(target["east_m"]), float(target["tvd_m"])]
+    pr = closest_point_on_path(dense, tgt, start_md=start_md, endpoint_only=endpoint_only)
+    if pr is None:
+        return None
+    md = dense["MD"].to_numpy(float); k = int(np.clip(np.searchsorted(md, pr["md"]), 0, len(md) - 1))
+    if k > 0 and abs(md[k - 1] - pr["md"]) < abs(md[k] - pr["md"]):
+        k -= 1
+    appr_ok, azi_d, inc_d, plane_a = _approach(dense, target)
+    ok = bool(pr["distance_m"] <= POINT_NUMERIC_TOL_M)
+    return {"name": str(target.get("name", "Target")), "intercept_md_m": float(pr["md"]), "lateral_error_m": float(pr["lateral_m"]),
+            "vertical_error_m": float(pr["vertical_m"]), "miss_distance_m": float(pr["distance_m"]), "point_distance_3d_m": float(pr["distance_m"]),
+            "within_tolerance": ok, "in_order": True, "exact_point_target": True,
+            "approach_azimuth_deg": float(dense["Azi"].iloc[k]), "approach_inclination_deg": float(dense["Inc"].iloc[k]),
+            "approach_azimuth_error_deg": float(azi_d[k]), "approach_inclination_error_deg": float(inc_d[k]),
+            "plane_intersection_angle_deg": float(plane_a[k]), "approach_constraints_pass": bool(appr_ok[k]),
+            "vertical_tolerance_m": float(POINT_NUMERIC_TOL_M)}
+
+
 def evaluate_target(dense, target, start_md=-1.0, endpoint_only=False, default_tol=DEFAULT_TOLERANCE_M):
     """Best valid interception of one target on the dense arc-resampled path."""
     md = dense["MD"].to_numpy(float); n = dense["Northing"].to_numpy(float); e = dense["Easting"].to_numpy(float); z = dense["TVD"].to_numpy(float)
@@ -115,11 +141,17 @@ def evaluate_target(dense, target, start_md=-1.0, endpoint_only=False, default_t
     cand = cand[-1:] if endpoint_only else cand[md > start_md + 1e-3]
     if len(cand) == 0:
         return None
+    if str((target.get('geometry') or target).get('type', 'Point')).lower() == 'point':
+        return _evaluate_point_target(dense, target, start_md, endpoint_only)
     miss = footprint_miss(target, n, e, default_tol)
     vert = z - plane_tvd(target, n, e)
     lat = np.hypot(n - float(target["north_m"]), e - float(target["east_m"]))
     appr_ok, azi_d, inc_d, plane_a = _approach(dense, target)
-    footprint_ok = (miss <= 1e-3) & (np.abs(vert) <= vert_tol)
+    # Point targets use only a numerical discretization threshold (0.5 m from
+    # the dense minimum-curvature arc), not a user-configurable engineering radius.
+    is_point = str((target.get('geometry') or target).get('type', 'Point')).lower() == 'point'
+    numeric_point_threshold_m = 0.5
+    footprint_ok = (miss <= (numeric_point_threshold_m if is_point else 1e-3)) & (np.abs(vert) <= (numeric_point_threshold_m if is_point else vert_tol))
     good = np.zeros(len(md), dtype=bool); good[cand] = footprint_ok[cand] & appr_ok[cand]
     inside = np.zeros(len(md), dtype=bool); inside[cand] = footprint_ok[cand]
     if good.any():
