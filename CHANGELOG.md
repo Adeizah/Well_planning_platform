@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-10-17 — Exact point targets, Stage 2 section re-optimization, speed
+
+**Targets / optimizer**
+- Point targets are exact geometric constraints (continuous closest-approach on the arcs; closure criterion 1e-4 m). Removed the 0.5 m dense-sampling acceptance.
+- Added a least-squares closure step, KOP-aware seeds and bounded nudge recovery.
+- Fixed: optimizer and validator now use the same KOP definition; `min_kop_md_m` / `max_kop_md_m` are part of station-level feasibility.
+- Added Stage 2 section reconstruction + re-optimization (`core/section_optimizer.py`); stations are generated from section parameters; the plan is adopted only if it passes independent validation, otherwise the Stage-1 plan is retained.
+- Planner UI: Stage 2 toggle/budget, section schedule, trajectory comparison, constraint margins.
+
+**Speed (results unchanged)** - measured in the build sandbox:
+- Simple single-point general optimization: ~93 s (full time budget) -> ~1-3 s.
+- Two ordered point targets: ~73 s -> ~3-5 s. Min-KOP case that previously failed after 67 s now passes in ~9 s.
+- `minimum_curvature` on 67 stations: 2.1 ms -> 0.29 ms (identical columns/dtypes; max difference 9e-12). Optimizer path kernel ~15x.
+- Full test suite now completes in a few minutes (previously it could not finish within the time limit).
+- Cached geomagnetic model evaluation and PROJ transformation report across Streamlit reruns.
+
+**Tests**: new `tests/test_exact_targets_and_stage2.py` (17 tests) and an app-level Stage 2 test. `tests/test_audit_fixes.py` updated: untyped targets are Points (exact, zero tolerance); areal tests now declare `type`.
+
 ## 2026-10-16 — Geodetic reference and coordinate-unit consistency
 
 - Added a searchable installed EPSG/PROJ CRS registry to Project & Reference, with the datum/reference frame shown as part of each CRS selection.
@@ -177,3 +195,9 @@ See `GAP_ANALYSIS.md` for evidence, tests and open items.
 - Added a configurable separation-factor threshold to the independent anti-collision screening report; the report samples the pairwise trajectory grid and separately reports geometric closest approach and minimum sampled SF locations.
 - Added target deletion confirmation and marks saved trajectories that depended on a deleted target as REVIEW.
 - Added regression tests for general optimization, missing offset survey review, target sequence metadata, inclined plane geometry and intersection-angle calculations.
+
+## Integrated trajectory work — 2026-10-16
+- Point targets now return zero engineering lateral/vertical tolerances; validation uses a small 0.5 m numerical discretization threshold on a denser 0.5 m arc-resampled path. This is a numerical approximation, not a survey-accuracy guarantee.
+- Added `core.section_reconstruction` to classify an accepted trajectory into vertical, build, drop, tangent, turn and combined sections and calculate schedule-level DLS/build/drop/turn checks.
+- General optimizer metadata now exposes the section schedule and explicitly labels the current implementation `CLASSIFIED_ONLY`; it does not yet perform section-parameter re-optimization or replace the original trajectory.
+- Targeted section/geodesy tests passed. Broader validation/app tests exceeded the available runtime and are not claimed as passed.

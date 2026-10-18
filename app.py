@@ -12,6 +12,7 @@ from core.project import new_project, project_to_json, project_from_json, valida
 from core.trajectory import minimum_curvature, build_constant_build_hold, solve_build_hold_hold_inclination, generate_profile_candidate, truncate_trajectory_at_md
 from core.optimizer import optimize_trajectory, _target_residual
 from core.general_optimizer import optimize_general_trajectory
+from core.section_reconstruction import constraint_margin_rows
 from core.geometry import target_boundary
 from core.validation import validate_trajectory, to_jsonable
 from core.dependencies import refresh_plan_staleness, attach_snapshot
@@ -86,6 +87,21 @@ NAV = [
     ('OUTPUTS', ['Visualization', 'QA/QC', 'Reports']),
     ('SYSTEM', ['About']),
 ]
+# ---- cached wrappers: these only depend on their arguments, so recomputing them on every Streamlit rerun is wasted time.
+_cache_data = getattr(st, 'cache_data', None) or (lambda *a, **k: (lambda f: f))
+
+
+@_cache_data(show_spinner=False, max_entries=64)
+def cached_geomagnetic(model, lat, lon, elevation_m, iso_date):
+    d = date.fromisoformat(iso_date)
+    return igrf14(lat, lon, elevation_m, d) if model == 'IGRF-14' else wmm2025(lat, lon, elevation_m, d)
+
+
+@_cache_data(show_spinner=False, max_entries=64)
+def cached_transformation_report(source_crs, target_crs, lon, lat):
+    return transformation_report(source_crs, target_crs, lon=lon, lat=lat)
+
+
 NAV_OPTIONS = [item for group, items in NAV for item in items]
 # Hard-coded sequential navigation numbering. These are display labels only;
 # page identity remains the underlying page name so reordering does not alter routing.
@@ -424,9 +440,9 @@ elif page=='Project & Reference':
         if ci.get('type') == 'Projected':
             st.info(f"Wellhead grid position: Northing {project.get('surface_northing_m',0):,.3f} m • Easting {project.get('surface_easting_m',0):,.3f} m • Geographic position: {project.get('latitude',0):.7f}°, {project.get('longitude',0):.7f}°")
         if mode == 'Latitude / Longitude':
-            report = transformation_report('EPSG:4326', project['crs'], lon=project['longitude'], lat=project['latitude'])
+            report = cached_transformation_report('EPSG:4326', project['crs'], project['longitude'], project['latitude'])
         elif ci.get('type') == 'Projected':
-            report = transformation_report(project['crs'], 'EPSG:4326', lon=project['longitude'], lat=project['latitude'])
+            report = cached_transformation_report(project['crs'], 'EPSG:4326', project['longitude'], project['latitude'])
         else:
             report = None
         if report and not report.get('best_available'):
@@ -455,10 +471,7 @@ elif page=='Project & Reference':
         refdata['project_crs'] = project['crs']
         refdata['geomagnetic_model'] = selected_model
         dt_calc = date.fromisoformat(str(project['planned_date']))
-        if selected_model == 'IGRF-14':
-            mag = igrf14(float(project['latitude']), float(project['longitude']), float(project.get('elevation_m', 0.0)), dt_calc)
-        else:
-            mag = wmm2025(float(project['latitude']), float(project['longitude']), float(project.get('elevation_m', 0.0)), dt_calc)
+        mag = dict(cached_geomagnetic(selected_model, float(project['latitude']), float(project['longitude']), float(project.get('elevation_m', 0.0)), dt_calc.isoformat()))
         refdata.update({'magnetic_declination_deg': mag['D'], 'magnetic_dip_deg': mag['I'], 'magnetic_total_field_nT': mag['F'], 'magnetic_horizontal_field_nT': mag['H'], 'magnetic_x_nT': mag['X'], 'magnetic_y_nT': mag['Y'], 'magnetic_z_nT': mag['Z'], 'geomagnetic_model_metadata': mag['metadata']})
         project['model_metadata'][selected_model] = mag['metadata']
         project['model_metadata'].setdefault('results', {})[selected_model] = mag
@@ -629,6 +642,10 @@ elif page=='Trajectory Planner':
         gc1.number_input('Minimum centreline clearance (ft)', min_value=0.0, max_value=5000.0, value=float(st.session_state.get('general_min_clearance_ft',100.0)), key='general_min_clearance_ft', help='Additional minimum geometric clearance used during route search; not a substitute for the required uncertainty-based separation-factor criterion.')
         gc2.number_input('Required separation factor', min_value=0.1, max_value=10.0, value=float(st.session_state.get('general_min_sf',2.0)), key='general_min_sf', help='Final clearance screening threshold. Company-approved criteria and validated uncertainty models are required for operational use.')
         gc3.number_input('Optimizer iterations', min_value=10, max_value=300, value=int(st.session_state.get('general_max_iter',60)), step=10, key='general_max_iter')
+        general_section_on=bool(st.session_state.get('general_section_reopt',True)); general_section_budget_s=float(st.session_state.get('general_section_budget',20))
+        sc1,sc2=st.columns(2)
+        general_section_on=sc1.checkbox('Stage 2: reconstruct into sections and re-optimize', value=bool(st.session_state.get('general_section_reopt',True)), key='general_section_reopt', help='After a validated feasible trajectory is found, rebuild it from vertical/build/tangent/drop/turn sections, re-optimize KOP, section lengths and rates, and regenerate the survey from the section parameters. The original feasible trajectory is kept if the section plan does not validate.')
+        general_section_budget_s=sc2.number_input('Stage 2 time budget (s)', min_value=5, max_value=300, value=int(st.session_state.get('general_section_budget',20)), step=5, key='general_section_budget')
         st.number_input('Search time budget (s)', min_value=10, max_value=600, value=int(st.session_state.get('general_time_budget',90)), step=10, key='general_time_budget', help='Upper limit on search time. If it is reached without a validated candidate the result is NO FEASIBLE CANDIDATE FOUND (a failed search, not a proof of infeasibility).')
     st.caption(f'Current design preset: **{saved_profile}**. Selected calculation profile: **{profile}**. The stored survey changes only when you generate the trajectory.')
     if st.button('Generate trajectory for selected shape',type='primary'):
@@ -659,6 +676,7 @@ elif page=='Trajectory Planner':
                     uncertainty_parameters=sigma_params,
                     target_tolerance_m=30.48, control_points=6,
                     kb_m=float(project.get('kb_m',0) or 0), time_budget_s=float(st.session_state.get('general_time_budget',90)),
+                    section_reoptimize=bool(general_section_on), section_time_budget_s=float(general_section_budget_s),
                 )
                 meta=dict(meta); meta['planning_mode']=planning_mode
                 meta['profile']='General control-point trajectory'
@@ -719,11 +737,17 @@ elif page=='Trajectory Planner':
             meta=dict(meta)
             meta['validation_status']=_val['status']; meta['validation_checks']=to_jsonable(_val['checks']); meta['survey_hash']=_val['survey_hash']
             meta['validator_version']=_val['validator_version']
+            if _val.get('target_results'):
+                meta['target_sequence_feasible']=all(bool(r.get('within_tolerance')) and bool(r.get('in_order')) for r in _val['target_results'])
+                meta['target_sequence_results']=to_jsonable(_val['target_results'])
             if _val['status']!='PASS':
                 meta['status']='REVIEW'; meta['final_md_is_target_intercept']=False
                 if meta.get('optimization_status')=='FEASIBLE': meta['optimization_status']='REVIEW'
                 meta['constraint_violations']=sorted(set(meta.get('constraint_violations',[]))|set(_val['violations']))
-                if meta.get('display_clip_md_m') is None:
+                # Keep full failed multi-target candidates visible for diagnosis.
+                # Clipping at the first missed target can misleadingly look like the
+                # optimizer stopped there instead of showing the attempted route to later targets.
+                if len(target_sequence) <= 1 and meta.get('display_clip_md_m') is None:
                     _bad=next((r for r in _val['target_results'] if not (r.get('within_tolerance') and r.get('in_order'))), (_val['target_results'][-1] if _val['target_results'] else None))
                     if _bad and _bad.get('intercept_md_m') is not None and math.isfinite(float(_bad['intercept_md_m'])): meta['display_clip_md_m']=float(_bad['intercept_md_m'])+30.48
             meta['result_class']='PASS' if meta['status']=='PASS' else meta.get('result_class') or ('REVIEW' if meta.get('optimization_status') not in ('NO_FEASIBLE_CANDIDATE_FOUND',) else 'NO FEASIBLE CANDIDATE FOUND')
@@ -782,6 +806,34 @@ elif page=='Trajectory Planner':
                 if col in seq_display: seq_display[col.replace('_m','_ft')]=seq_display[col]*M_TO_FT
             st.dataframe(seq_display.drop(columns=[c for c in ['intercept_md_m','lateral_error_m','vertical_error_m','miss_distance_m'] if c in seq_display]),use_container_width=True,hide_index=True)
             st.caption('All required targets must be intercepted in order. The final required target defines the target-terminated TD when the complete trajectory is feasible.')
+        if meta.get('section_schedule') is not None and saved_mode == 'General trajectory optimizer (experimental)':
+            st.markdown('#### Section schedule')
+            _sstat=meta.get('section_reconstruction_status','—')
+            (st.success if _sstat=='REOPTIMIZED' else st.info if _sstat in ('CLASSIFIED_ONLY','NOT_ATTEMPTED_INFEASIBLE_BASE') else st.warning)(f"Stage 2 section reconstruction: **{_sstat}** • trajectory source: **{meta.get('final_trajectory_source','—')}**. {meta.get('section_reconstruction_note','')}")
+            _sched=pd.DataFrame(meta['section_schedule'])
+            if not _sched.empty:
+                _v=pd.DataFrame({'Section':_sched.get('section',pd.Series(range(1,len(_sched)+1))),'Type':_sched['type'],
+                    'Start MD (ft)':_sched['start_md_m']*M_TO_FT,'End MD (ft)':_sched['end_md_m']*M_TO_FT,'Length (ft)':(_sched['end_md_m']-_sched['start_md_m'])*M_TO_FT,
+                    'Start inc (°)':_sched['start_inc_deg'],'End inc (°)':_sched['end_inc_deg'],'Start azi (°)':_sched['start_azi_deg'],'End azi (°)':_sched['end_azi_deg'],
+                    'Build/drop (°/100 ft)':_sched['build_drop_rate_deg_30m'].map(dls_30m_to_100ft),'Turn (°/100 ft)':_sched['turn_rate_deg_30m'].map(dls_30m_to_100ft),
+                    'Max DLS (°/100 ft)':_sched['max_dls_deg_30m'].map(dls_30m_to_100ft)})
+                st.dataframe(_v,use_container_width=True,hide_index=True)
+            _chk=meta.get('section_schedule_constraint_check',{})
+            if _chk.get('violations'): st.error('Section-schedule constraint violations: '+'; '.join(_chk['violations']))
+            for _att in (meta.get('section_reoptimization') or {}).get('attempts',[]):
+                if meta.get('section_reconstruction_status')!='REOPTIMIZED': st.caption(f"Stage 2 attempt: {_att.get('sections')} sections, {_att.get('mode')} rates → {_att.get('validation_status','not validated')} {_att.get('violations') or ''} {_att.get('message','')[:90]}")
+            _s1,_fm=meta.get('stage1_metrics'),meta.get('final_metrics')
+            if _s1 and _fm:
+                st.markdown('#### Trajectory comparison: Stage 1 feasible path vs final')
+                _rows=[('Final MD (ft)','final_md_m',M_TO_FT),('Final TVD (ft)','final_tvd_m',M_TO_FT),('KOP MD (ft)','kop_md_m',M_TO_FT),('Max inclination (°)','max_inclination_deg',1.0),
+                       ('Max DLS (°/100 ft)','max_dls_deg_30m',dls_30m_to_100ft(1.0)),('Max build/drop (°/100 ft)','max_build_rate_deg_30m',dls_30m_to_100ft(1.0)),('Max turn (°/100 ft)','max_turn_rate_deg_30m',dls_30m_to_100ft(1.0))]
+                st.dataframe(pd.DataFrame([{'Metric':lbl,'Stage 1':float(_s1[k])*f,'Final':float(_fm[k])*f,'Change':(float(_fm[k])-float(_s1[k]))*f} for lbl,k,f in _rows]),use_container_width=True,hide_index=True)
+        if meta.get('validation_checks'):
+            _mrows=constraint_margin_rows(meta['validation_checks'])
+            if _mrows:
+                st.markdown('#### Constraint margins')
+                _m=pd.DataFrame(_mrows); st.dataframe(_m.astype({c:'object' for c in _m.columns}),use_container_width=True,hide_index=True)
+                st.caption('Margin = limit − value (positive is inside the limit; units: m, deg or deg/30 m as stored). Target rows show the negative miss distance. Failed checks are listed above under constraint violations.')
         if saved_mode in ('Optimize selected profile to target', 'Optimize (free KOP)', 'Optimize (fixed KOP)', 'Optimize (KOP window)', 'General trajectory optimizer (experimental)'):
             st.metric('Optimization outcome',meta.get('optimization_status','REVIEW'))
             st.caption(f"Objective score: {float(meta.get('objective_m',float('nan'))):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {float(meta.get('max_dls_deg_30m',float('nan'))):.2f}°/30 m")
