@@ -56,3 +56,19 @@ def test_validated_general_plan_becomes_active_and_measured_survey_is_backed_up(
     assert err2 is None and b['planner_result']['status'] == 'REVIEW' and any("'T1' was edited" in r for r in b['stale_reasons'])
     for page in ('Visualization', 'QA/QC', 'Reports', 'Anti-Collision'):
         _, e = run_app(page, copy.deepcopy(pr)); assert e is None, page
+
+
+def test_planner_page_runs_stage2_and_stores_section_schedule_and_comparison():
+    fake, err = run_app('Trajectory Planner', _project(), overrides={'Planning mode': 'General trajectory optimizer (experimental)', 'general_time_budget': 60, 'general_max_iter': 40,
+                                                                    'general_section_reopt': True, 'general_section_budget': 20},
+                        clicks=['Generate trajectory for selected shape'])
+    pr = fake.session_state['project']; res = pr['planned_trajectory_metadata']['planner_result']
+    assert err is None and res['status'] == 'PASS'
+    assert res['section_reconstruction_status'] in ('REOPTIMIZED', 'RETAINED_ORIGINAL_RECONSTRUCTION_FAILED', 'RETAINED_ORIGINAL_SECTION_PLAN_TOO_LONG')
+    assert res['section_schedule'] and res['stage1_metrics'] and res['final_metrics']
+    assert res['final_metrics']['validation_status'] == 'PASS'      # never a successful label on an invalid plan
+    # opting out keeps Stage 1 and says so explicitly
+    fake2, err2 = run_app('Trajectory Planner', _project(), overrides={'Planning mode': 'General trajectory optimizer (experimental)', 'general_time_budget': 60, 'general_max_iter': 40,
+                                                                      'general_section_reopt': False}, clicks=['Generate trajectory for selected shape'])
+    r2 = fake2.session_state['project']['planned_trajectory_metadata']['planner_result']
+    assert err2 is None and r2['section_reconstruction_status'] == 'CLASSIFIED_ONLY'

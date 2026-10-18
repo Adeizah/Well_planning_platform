@@ -241,3 +241,22 @@ def test_exhausted_search_is_reported_as_no_feasible_candidate_not_as_proof():
 def test_optimizer_respects_kop_and_max_md_constraints():
     path, meta = _opt([T('A', 1500, 0, 900)], min_kop_md_m=400.0)
     assert meta['status'] == 'PASS' and _independent_recheck(path, [T('A', 1500, 0, 900)])['metrics']['kop_md_m'] >= 400.0 - 1.0
+
+
+def test_failed_multi_target_candidate_is_not_clipped_before_later_targets():
+    """Keep the full failed candidate visible so later-target attempts remain diagnosable."""
+    import pandas as pd
+    from core.visual import display_path
+    path = pd.DataFrame({
+        'MD': [0.0, 100.0, 200.0, 300.0],
+        'Inc': [0.0, 10.0, 20.0, 30.0],
+        'Azi': [0.0, 10.0, 20.0, 30.0],
+        'Northing': [0.0, 1.0, 2.0, 3.0],
+        'Easting': [0.0, 1.0, 2.0, 3.0],
+        'TVD': [0.0, 99.0, 196.0, 290.0],
+    })
+    result = {'status': 'REVIEW', 'required_target_count': 2,
+              'target_sequence_feasible': False, 'display_clip_md_m': 120.0,
+              'target_intercept_md_m': 100.0}
+    shown = display_path(path, result)
+    assert float(shown.MD.iloc[-1]) == float(path.MD.iloc[-1])

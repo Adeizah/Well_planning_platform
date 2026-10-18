@@ -97,10 +97,12 @@ def test_rectangular_target_orientation():
 
 
 def test_target_tolerance_and_thickness():
-    assert target_tolerances({}) == (30.48, 30.48)
-    assert target_tolerances({'tolerance_m': 10.0, 'vertical_tolerance_m': 5.0}) == (10.0, 5.0)
-    assert abs(target_tolerances({'tolerance_m': 5.0, 'thickness_m': 40.0})[1] - 20.0) < 1e-9
-    assert target_tolerances({'tolerance_m': 5.0, 'thickness_m': 40.0, 'dip_deg': 60.0})[1] > 39.9
+    assert target_tolerances({}) == (0.0, 0.0)                                   # Point targets are exact geometric constraints (no tolerance radius)
+    assert target_tolerances({'type': 'Point', 'tolerance_m': 25.0}) == (0.0, 0.0)  # a stray tolerance value never turns a point into an area
+    assert target_tolerances({'type': 'Circular'}) == (30.48, 30.48)             # areal targets keep their default band
+    assert target_tolerances({'type': 'Circular', 'tolerance_m': 10.0, 'vertical_tolerance_m': 5.0}) == (10.0, 5.0)
+    assert abs(target_tolerances({'type': 'Circular', 'tolerance_m': 5.0, 'thickness_m': 40.0})[1] - 20.0) < 1e-9
+    assert target_tolerances({'type': 'Circular', 'tolerance_m': 5.0, 'thickness_m': 40.0, 'dip_deg': 60.0})[1] > 39.9
 
 
 # --------------------------------------------------------------------- survey calculations
