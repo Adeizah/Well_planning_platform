@@ -60,11 +60,15 @@ def build_section_schedule(path: pd.DataFrame, *, max_dls_deg_30m: float = 3.0,
 
 
 def validate_section_schedule(schedule, *, max_dls_deg_30m: float,
-                              max_build_rate_deg_30m: float, max_turn_rate_deg_30m: float) -> dict:
+                              max_build_rate_deg_30m: float, max_turn_rate_deg_30m: float,
+                              max_drop_rate_deg_30m: float | None = None) -> dict:
     violations=[]
+    max_drop_rate_deg_30m = max_build_rate_deg_30m if max_drop_rate_deg_30m is None else float(max_drop_rate_deg_30m)
     for i,s in enumerate(schedule):
         if s['max_dls_deg_30m'] > max_dls_deg_30m + 1e-6: violations.append(f'Section {i+1}: DLS limit exceeded')
-        if abs(s['build_drop_rate_deg_30m']) > max_build_rate_deg_30m + 1e-6: violations.append(f'Section {i+1}: build/drop rate limit exceeded')
+        rate=float(s['build_drop_rate_deg_30m'])
+        if rate > max_build_rate_deg_30m + 1e-6: violations.append(f'Section {i+1}: build rate limit exceeded')
+        if rate < -max_drop_rate_deg_30m - 1e-6: violations.append(f'Section {i+1}: drop rate limit exceeded')
         if abs(s['turn_rate_deg_30m']) > max_turn_rate_deg_30m + 1e-6: violations.append(f'Section {i+1}: turn rate limit exceeded')
     return {'status':'PASS' if not violations else 'REVIEW','violations':violations,
             'note':'Section classification only; not a re-optimized trajectory. Validate the underlying survey independently.'}

@@ -211,7 +211,7 @@ def validate_trajectory(survey, *, targets=None, constraints=None, offsets=None,
 
     ``targets`` are well-relative dicts (``north_m``, ``east_m``, ``tvd_m`` [+ optional geometry,
     tolerances, dip, approach constraints]) in required interception order. ``constraints`` may hold
-    ``max_inclination_deg``, ``max_dls_deg_30m``, ``max_build_rate_deg_30m``, ``max_turn_rate_deg_30m``,
+    ``max_inclination_deg``, ``max_dls_deg_30m``, ``max_build_rate_deg_30m``, ``max_drop_rate_deg_30m``, ``max_turn_rate_deg_30m``,
     ``max_md_m``, ``min_kop_md_m``, ``max_kop_md_m``. Unspecified limits are reported as not applicable.
     """
     constraints = dict(constraints or {}); targets = list(targets or []); offsets = list(offsets or [])
@@ -252,13 +252,16 @@ def validate_trajectory(survey, *, targets=None, constraints=None, offsets=None,
 
     # ---- 4. drilling constraints (continuous: DLS/build/turn are exact per arc segment)
     dls = path["DLS"].to_numpy(float)[1:]
-    build = np.abs(np.diff(inc)) / dmd * 30.0
+    inc_rate = np.diff(inc) / dmd * 30.0
+    build = np.maximum(inc_rate, 0.0)
+    drop = np.maximum(-inc_rate, 0.0)
     az_un = np.degrees(np.unwrap(np.radians(azi)))
     turn = np.abs(np.diff(az_un)) / dmd * 30.0
     az_defined = np.maximum(inc[:-1], inc[1:]) >= 0.5          # azimuth is undefined in a (near-)vertical hole
     turn_eff = np.where(az_defined, turn, 0.0)
     metrics = {"max_inclination_deg": float(inc.max()), "max_dls_deg_30m": float(dls.max(initial=0.0)),
-               "max_build_rate_deg_30m": float(build.max(initial=0.0)), "max_turn_rate_deg_30m": float(turn_eff.max(initial=0.0)),
+               "max_build_rate_deg_30m": float(build.max(initial=0.0)), "max_drop_rate_deg_30m": float(drop.max(initial=0.0)),
+               "max_turn_rate_deg_30m": float(turn_eff.max(initial=0.0)),
                "final_md_m": float(md[-1]), "final_tvd_m": float(path.TVD.iloc[-1]), "final_north_m": float(path.Northing.iloc[-1]),
                "final_east_m": float(path.Easting.iloc[-1]), "final_inclination_deg": float(inc[-1]), "final_azimuth_deg": float(azi[-1]),
                "max_station_spacing_m": float(dmd.max(initial=0.0)), "station_count": int(len(md))}
@@ -267,6 +270,7 @@ def validate_trajectory(survey, *, targets=None, constraints=None, offsets=None,
     for key, label, value, tol in (("max_inclination_deg", "maximum_inclination", metrics["max_inclination_deg"], 1e-3),
                                    ("max_dls_deg_30m", "maximum_DLS", metrics["max_dls_deg_30m"], 1e-3),
                                    ("max_build_rate_deg_30m", "maximum_build_rate", metrics["max_build_rate_deg_30m"], 1e-3),
+                                   ("max_drop_rate_deg_30m", "maximum_drop_rate", metrics["max_drop_rate_deg_30m"], 1e-3),
                                    ("max_turn_rate_deg_30m", "maximum_turn_rate", metrics["max_turn_rate_deg_30m"], 1e-3)):
         if constraints.get(key) is None:
             checks.append(_check(label, "N/A", value, None, "No limit supplied."))
