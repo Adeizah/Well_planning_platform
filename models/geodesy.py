@@ -1,6 +1,7 @@
 import math
 import requests
 from pyproj import CRS, Transformer, Proj, database
+from pyproj.transformer import TransformerGroup
 
 NOAA_GEOID_URL = "https://geodesy.noaa.gov/api/geoid/ght"
 
@@ -19,25 +20,58 @@ def crs_info(crs_code):
 
 
 def transform_coordinates(x, y, source_crs, target_crs, strict=False, lon=None, lat=None):
-    """Transform coordinates, optionally refusing unavailable/ballpark operations.
+    """Transform coordinates with location-aware operation selection.
 
-    Coordinates are always in the native axis units of the supplied CRSs. The
-    caller must not label coordinates with a new CRS without transforming them.
+    Inputs and outputs use each CRS's native axis units. In strict mode, do not
+    silently fall back to ballpark operations. If the needed high-accuracy
+    operation/grid is unavailable, return an actionable error rather than
+    presenting an approximate result as authoritative.
     """
     source = CRS.from_user_input(source_crs)
     target = CRS.from_user_input(target_crs)
+    x, y = float(x), float(y)
     kwargs = {"always_xy": True}
-    if lon is not None and lat is not None:
-        from pyproj.aoi import AreaOfInterest
-        kwargs["area_of_interest"] = AreaOfInterest(float(lon)-0.05, float(lat)-0.05, float(lon)+0.05, float(lat)+0.05)
+    probe_lon, probe_lat = lon, lat
+    # Determine an area of interest from the actual coordinate where possible.
+    if probe_lon is None or probe_lat is None:
+        try:
+            if source.is_geographic:
+                probe_lon, probe_lat = x, y
+            else:
+                to_geo = Transformer.from_crs(source, "EPSG:4326", always_xy=True)
+                probe_lon, probe_lat = to_geo.transform(x, y, errcheck=True)
+        except Exception:
+            probe_lon = probe_lat = None
+    if probe_lon is not None and probe_lat is not None:
+        try:
+            from pyproj.aoi import AreaOfInterest
+            kwargs["area_of_interest"] = AreaOfInterest(float(probe_lon)-0.05, float(probe_lat)-0.05,
+                                                         float(probe_lon)+0.05, float(probe_lat)+0.05)
+        except Exception:
+            pass
     if strict:
-        kwargs.update({"allow_ballpark": False, "only_best": True})
-    transformer = Transformer.from_crs(source, target, **kwargs)
-    xx, yy = transformer.transform(float(x), float(y), errcheck=True)
+        from pyproj.transformer import TransformerGroup
+        group = TransformerGroup(source, target, always_xy=True,
+                                 area_of_interest=kwargs.get("area_of_interest"),
+                                 allow_ballpark=False)
+        if not group.transformers:
+            missing = []
+            for op in getattr(group, "unavailable_operations", []):
+                for grid in getattr(op, "grids", []):
+                    if not getattr(grid, "available", True):
+                        missing.append(getattr(grid, "short_name", getattr(grid, "name", "required grid")))
+            detail = (" Missing transformation grid(s): " + ", ".join(sorted(set(missing))) + "."
+                      if missing else " No non-ballpark coordinate operation is available for this CRS pair/location.")
+            raise ValueError("Suitable datum transformation unavailable." + detail +
+                             " Install the authoritative grid resource or supply a verified transformation; coordinates were not converted.")
+        transformer = group.transformers[0]
+        if transformer.accuracy < 0:
+            raise ValueError("A non-ballpark operation exists, but its accuracy is not stated. Strict mode will not certify this transformation.")
+    else:
+        transformer = Transformer.from_crs(source, target, **kwargs)
+    xx, yy = transformer.transform(x, y, errcheck=True)
     if not (math.isfinite(xx) and math.isfinite(yy)):
         raise ValueError("Coordinate transformation returned a non-finite result.")
-    if strict and transformer.accuracy < 0:
-        raise ValueError("No stated-accuracy coordinate operation is available; use a suitable transformation/grid resource.")
     return float(xx), float(yy)
 
 
@@ -178,6 +212,29 @@ def transformation_report(source_crs, target_crs, lon=None, lat=None):
             "description": "; ".join(errors) or "No coordinate operation could be constructed.",
             "area_of_interest_used": False, "diagnostic_fallback_used": True}
 
+
+
+def transformation_operations(source_crs, target_crs, lon=None, lat=None):
+    """Enumerate usable and unavailable PROJ operations and missing grids."""
+    source = CRS.from_user_input(source_crs)
+    target = CRS.from_user_input(target_crs)
+    kwargs = {"always_xy": True, "allow_ballpark": False}
+    if lon is not None and lat is not None:
+        from pyproj.aoi import AreaOfInterest
+        kwargs["area_of_interest"] = AreaOfInterest(float(lon)-0.05, float(lat)-0.05,
+                                                     float(lon)+0.05, float(lat)+0.05)
+    group = TransformerGroup(source, target, **kwargs)
+    usable = [{"description": t.description, "accuracy_m": t.accuracy} for t in group.transformers]
+    missing = []
+    for operation in group.unavailable_operations:
+        grids = [getattr(g, "short_name", getattr(g, "name", "grid"))
+                 for g in getattr(operation, "grids", []) if not getattr(g, "available", True)]
+        missing.append({"operation": operation.name, "missing_grids": grids})
+    return {"source_crs": source.to_string(), "target_crs": target.to_string(),
+            "available_operations": usable, "unavailable_operations": missing,
+            "best_available": bool(group.best_available and usable),
+            "message": "Suitable operation available" if group.best_available and usable else
+                       "One or more preferred operations unavailable; inspect missing grids and accuracy before use."}
 
 def grid_convergence_deg(lat, lon, crs_code):
     """Return meridian convergence from the selected projected CRS, where supported."""
