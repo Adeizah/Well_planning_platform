@@ -20,8 +20,8 @@ from core.visual import display_path
 from core.survey_qc import survey_quality_report
 from core.trajectory import interpolate_path
 from core.reference import magnetic_to_true, true_to_grid, grid_to_true, true_to_magnetic, magnetic_to_grid, grid_to_magnetic, reference_requirements, convert_to_project_reference
-from models.geomagnetic import wmm2025, igrf14
-from models.geodesy import crs_info, transform_coordinates, grid_convergence_deg, normal_gravity, noaa_geoid_height, common_crs_registry, search_crs_registry, transformation_report, projected_coordinates_to_metres, metres_to_projected_coordinates, transform_projected_grid_metres
+from models.geomagnetic import igrf14
+from models.geodesy import crs_info, transform_coordinates, grid_convergence_deg, normal_gravity, noaa_geoid_height, common_crs_registry, search_crs_registry, transformation_report, transformation_operations, projected_coordinates_to_metres, metres_to_projected_coordinates, transform_projected_grid_metres
 from engineering.anti_collision import clearance_report
 from models.survey_uncertainty import station_covariances
 from engineering.casing import casing_screen, casing_program_summary, casing_geometry_checks, casing_design_checks
@@ -94,7 +94,7 @@ _cache_data = getattr(st, 'cache_data', None) or (lambda *a, **k: (lambda f: f))
 @_cache_data(show_spinner=False, max_entries=64)
 def cached_geomagnetic(model, lat, lon, elevation_m, iso_date):
     d = date.fromisoformat(iso_date)
-    return igrf14(lat, lon, elevation_m, d) if model == 'IGRF-14' else wmm2025(lat, lon, elevation_m, d)
+    return igrf14(lat, lon, elevation_m, d)
 
 
 @_cache_data(show_spinner=False, max_entries=64)
@@ -430,8 +430,11 @@ elif page=='Project & Reference':
     st.markdown('### Active reference details')
     try:
         ci = crs_info(project['crs'])
-        conv = grid_convergence_deg(project['latitude'], project['longitude'], project['crs'])
-        project['reference_data']['grid_convergence_deg'] = conv
+        if project.get('reference_data', {}).get('grid_convergence_source') != 'User supplied':
+            conv = grid_convergence_deg(project['latitude'], project['longitude'], project['crs'])
+            project['reference_data']['grid_convergence_deg'] = conv
+        else:
+            conv = float(project['reference_data'].get('grid_convergence_deg', 0.0))
         project['reference_data']['project_crs'] = project['crs']
         project['reference_data']['datum'] = ci.get('datum')
         project['reference_data']['ellipsoid'] = ci.get('ellipsoid')
@@ -454,46 +457,90 @@ elif page=='Project & Reference':
     a,b,c=st.columns(3); project['north_reference']=a.selectbox('Primary north reference',['True North','Grid North','Magnetic North'],index=['True North','Grid North','Magnetic North'].index(project.get('north_reference','Grid North'))); depth_options=['MD / TVDSS','MD / TVD']; project['depth_reference']=b.selectbox('Depth reference',depth_options,index=depth_options.index(project.get('depth_reference','MD / TVDSS'))); project['status']=c.selectbox('Project status',['Planning','Draft','Under Review','Approved for Training'],index=['Planning','Draft','Under Review','Approved for Training'].index(project.get('status','Planning')))
     st.markdown('### Design constraints')
     dc=project['design_constraints']; a,b,c=st.columns(3); dc['max_dls_deg_30m']=dls_100ft_to_30m(a.number_input('Max DLS (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_dls_deg_30m'])))); dc['max_inclination_deg']=b.number_input('Max inclination (°)',0.,180.,float(dc['max_inclination_deg'])); dc['max_build_rate_deg_30m']=dls_100ft_to_30m(c.number_input('Max build rate (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_build_rate_deg_30m']))))
-    st.markdown('### Geomagnetic model and automatic reference calculations')
-    st.caption('Reference quantities are calculated from the project location and planning date, stored in the project model, and reused by survey/trajectory workflows. The former standalone Geodesy and Geomagnetics pages are no longer part of the navigation.')
-    saved_model = project.get('model_metadata', {}).get('active_geomagnetic_model', project.get('reference_data', {}).get('geomagnetic_model', 'IGRF-14'))
-    if saved_model not in ['IGRF-14', 'WMM2025']:
-        saved_model = 'IGRF-14'
-    selected_model = st.selectbox('Geomagnetic model', ['IGRF-14', 'WMM2025'], index=['IGRF-14', 'WMM2025'].index(saved_model), help='IGRF-14 is the latest IGRF generation; WMM2025 is an alternative global model.')
-    project.setdefault('model_metadata', {})['active_geomagnetic_model'] = selected_model
+    st.markdown('### Reference calculations')
+    st.caption('IGRF is the only geomagnetic model used by this project. Calculated or manually supplied reference values are stored centrally and reused by survey and trajectory workflows.')
+    refdata = project.setdefault('reference_data', {})
+    model_mode = st.radio('Magnetic reference values', ['Calculate using IGRF-14', 'Enter values manually'], horizontal=True, key='magnetic_input_mode')
+    dt_calc = date.fromisoformat(str(project['planned_date']))
+    if model_mode == 'Calculate using IGRF-14':
+        try:
+            mag = dict(cached_geomagnetic('IGRF-14', float(project['latitude']), float(project['longitude']), float(project.get('elevation_m', 0.0)), dt_calc.isoformat()))
+            refdata.update({'geomagnetic_model':'IGRF-14', 'geomagnetic_model_metadata':mag['metadata'],
+                'magnetic_declination_deg':mag['D'], 'magnetic_dip_deg':mag['I'], 'magnetic_total_field_nT':mag['F'],
+                'magnetic_horizontal_field_nT':mag['H'], 'magnetic_x_nT':mag['X'], 'magnetic_y_nT':mag['Y'], 'magnetic_z_nT':mag['Z']})
+            project.setdefault('model_metadata', {})['active_geomagnetic_model'] = 'IGRF-14'
+            project['model_metadata']['IGRF-14'] = mag['metadata']
+            project['model_metadata'].setdefault('results', {})['IGRF-14'] = mag
+            st.caption(f"IGRF-14 calculation date: {dt_calc.isoformat()} • {mag['metadata'].get('source', 'ppigrf')} • height {float(project.get('elevation_m', 0.0)):.2f} m")
+        except Exception as exc:
+            st.error(f'IGRF-14 calculation failed: {exc}. Enter verified values manually if you have an authoritative source.')
+    else:
+        st.caption('Enter values from a verified source. Manual values are tagged as user-supplied and are not represented as calculated IGRF results.')
+        fields = [
+            ('magnetic_declination_deg','Magnetic declination (°)',-180.0,180.0),
+            ('magnetic_dip_deg','Magnetic dip (°)',-90.0,90.0),
+            ('magnetic_total_field_nT','Total field strength (nT)',0.0,100000.0),
+            ('magnetic_horizontal_field_nT','Horizontal field strength (nT)',0.0,100000.0),
+            ('magnetic_x_nT','X — north component (nT)',-100000.0,100000.0),
+            ('magnetic_y_nT','Y — east component (nT)',-100000.0,100000.0),
+            ('magnetic_z_nT','Z — down component (nT)',-100000.0,100000.0),
+        ]
+        cols = st.columns(4)
+        manual_values = {}
+        for i, (key, label, low, high) in enumerate(fields):
+            existing = refdata.get(key)
+            default = float(existing) if existing is not None else 0.0
+            manual_values[key] = cols[i % 4].number_input(label, min_value=low, max_value=high, value=default, format='%.4f' if 'deg' in key else '%.2f', key='manual_'+key)
+        if st.button('Apply manual magnetic values'):
+            refdata.update(manual_values)
+            refdata['geomagnetic_model'] = 'Manual input'
+            refdata['geomagnetic_model_metadata'] = {'model':'Manual input','source':'User supplied','calculation_date':dt_calc.isoformat()}
+            project.setdefault('model_metadata', {})['active_geomagnetic_model'] = 'Manual input'
+            save()
+            st.success('Manual magnetic values saved to the shared project reference.')
+    st.markdown('#### Active magnetic values')
+    mcols = st.columns(4)
+    mcols[0].metric('Declination', f"{float(refdata['magnetic_declination_deg']):.4f}°" if refdata.get('magnetic_declination_deg') is not None else 'Not set')
+    mcols[1].metric('Dip', f"{float(refdata['magnetic_dip_deg']):.4f}°" if refdata.get('magnetic_dip_deg') is not None else 'Not set')
+    mcols[2].metric('Total field', f"{float(refdata['magnetic_total_field_nT']):.1f} nT" if refdata.get('magnetic_total_field_nT') is not None else 'Not set')
+    mcols[3].metric('Horizontal field', f"{float(refdata['magnetic_horizontal_field_nT']):.1f} nT" if refdata.get('magnetic_horizontal_field_nT') is not None else 'Not set')
+
+    st.markdown('#### Grid convergence')
+    convergence_mode = st.radio('Grid convergence source', ['Calculate from selected CRS', 'Enter manually'], horizontal=True, key='grid_convergence_mode')
+    if convergence_mode == 'Calculate from selected CRS':
+        try:
+            conv = grid_convergence_deg(float(project['latitude']), float(project['longitude']), project['crs'])
+            refdata['grid_convergence_deg'] = conv
+            refdata['grid_convergence_source'] = 'Calculated from project CRS and wellhead location'
+            st.metric('Grid convergence', f'{conv:.6f}°')
+        except Exception as exc:
+            st.error(f'Grid convergence calculation failed: {exc}')
+    else:
+        current_conv = refdata.get('grid_convergence_deg')
+        manual_conv = st.number_input('Grid convergence (°; east-positive convention)', min_value=-180.0, max_value=180.0,
+            value=float(current_conv) if current_conv is not None else 0.0, format='%.6f', key='manual_grid_convergence')
+        if st.button('Apply manual grid convergence'):
+            refdata['grid_convergence_deg'] = float(manual_conv)
+            refdata['grid_convergence_source'] = 'User supplied'
+            save()
+            st.success('Manual grid convergence saved to the shared project reference.')
     try:
-        # Recompute reference values whenever project location, CRS, elevation, date or model changes.
-        conv = grid_convergence_deg(float(project['latitude']), float(project['longitude']), project['crs'])
         grav = normal_gravity(float(project['latitude']), float(project.get('elevation_m', 0.0)))
-        refdata = project.setdefault('reference_data', {})
-        refdata['grid_convergence_deg'] = conv
         refdata['gravity_mps2'] = grav
-        refdata['project_crs'] = project['crs']
-        refdata['geomagnetic_model'] = selected_model
-        dt_calc = date.fromisoformat(str(project['planned_date']))
-        mag = dict(cached_geomagnetic(selected_model, float(project['latitude']), float(project['longitude']), float(project.get('elevation_m', 0.0)), dt_calc.isoformat()))
-        refdata.update({'magnetic_declination_deg': mag['D'], 'magnetic_dip_deg': mag['I'], 'magnetic_total_field_nT': mag['F'], 'magnetic_horizontal_field_nT': mag['H'], 'magnetic_x_nT': mag['X'], 'magnetic_y_nT': mag['Y'], 'magnetic_z_nT': mag['Z'], 'geomagnetic_model_metadata': mag['metadata']})
-        project['model_metadata'][selected_model] = mag['metadata']
-        project['model_metadata'].setdefault('results', {})[selected_model] = mag
-        project['reference_data']['magnetic_declination_deg'] = mag['D']
-        project['reference_data']['magnetic_dip_deg'] = mag['I']
-        project['reference_data']['magnetic_total_field_nT'] = mag['F']
-        a,b,c,d = st.columns(4)
-        a.metric('Grid convergence', f'{conv:.4f}°')
-        b.metric('Magnetic declination', f"{mag['D']:.4f}°")
-        c.metric('Magnetic dip', f"{mag['I']:.4f}°")
-        d.metric('Total magnetic field', f"{mag['F']:.1f} nT")
-        st.caption(f"Calculated for {dt_calc.isoformat()} using {mag['metadata'].get('model', selected_model)} • {mag['metadata'].get('source', 'model library')} • normal gravity {grav:.6f} m/s². Values are reused by the backend; verify model provenance and survey requirements before operational use.")
+        st.metric('Normal gravity', f'{grav:.6f} m/s²')
     except Exception as exc:
-        st.warning(f'Reference quantities could not all be refreshed: {exc}. The project CRS remains selected, but missing magnetic values must not be assumed valid.')
-    with st.expander('Advanced geodesy diagnostics and coordinate transformation'):
+        st.warning(f'Normal gravity could not be calculated: {exc}')
+
+    with st.expander('Transformation diagnostics'):
         try:
             st.write(crs_info(project['crs']))
             report = transformation_report('EPSG:4326', project['crs'], lon=project.get('longitude'), lat=project.get('latitude'))
             st.write(report)
+            st.markdown('**Available and unavailable non-ballpark operations**')
+            st.write(transformation_operations('EPSG:4326', project['crs'], lon=project.get('longitude'), lat=project.get('latitude')))
         except Exception as exc:
             st.warning(f'Geodesy diagnostic unavailable: {exc}')
-        st.caption('Grid convergence, normal gravity and magnetic field quantities are computed automatically above. This section is for diagnostics, not a required workflow page.')
+        st.caption('CRS transformations run in the backend. A CRS may be recognized while its high-accuracy datum transformation is unavailable; verify local control and required grid resources before operational use.')
 
     if st.button('Save project/reference settings',type='primary'): save(); st.success('Saved.')
 
@@ -596,141 +643,90 @@ elif page=='Trajectory Planner':
     default_az=(math.degrees(math.atan2(rel_e,rel_n))%360.0) if abs(rel_n)+abs(rel_e)>1e-9 else 0.0
     max_inc=float(project.get('design_constraints',{}).get('max_inclination_deg',57.0) or 57.0)
     default_hold=min(57.0,max_inc)
-    profile_options=['Vertical','J-Profile','S-Profile','Horizontal','ERD','Custom']
-    profile_labels={'J-Profile':'J-profile / Build & Hold','S-Profile':'S-profile / Build-Hold-Drop'}
+    # Unified trajectory optimizer: one search engine, one constraint configuration.
     saved_profile=project.get('well_design','J-Profile')
     saved_profile={'Build & Hold':'J-Profile','Build-Hold-Drop':'S-Profile'}.get(saved_profile,saved_profile)
-    profile_default=saved_profile if saved_profile in profile_options else 'J-Profile'
-    profile=st.selectbox('Well trajectory shape',profile_options,index=profile_options.index(profile_default),format_func=lambda x:profile_labels.get(x,x),help='J-profile and Build & Hold share one geometry. S-profile and Build-Hold-Drop share one geometry. This selection is also stored as the shared Well design preset on Project & Reference.')
-    # Keep the design preset synchronized immediately, not only after calculation.
-    project['well_design']=profile
-    save()
-    if profile=='Custom': st.info('Custom currently uses a configurable build–hold–drop template. Optimization searches KOP, build rate, peak inclination, azimuth, drop start, drop rate and final inclination. Arbitrary user-defined multi-section control points are not yet implemented.')
-    planning_mode=st.radio('Planning mode',['Manual profile','Optimize (free KOP)','Optimize (fixed KOP)','Optimize (KOP window)','General trajectory optimizer (experimental)'],horizontal=True,help='The profile modes optimize a predefined profile family. General trajectory optimizer searches a flexible variable-inclination/azimuth path with control points and optional offset avoidance; treat results as engineering-development candidates requiring review.')
-    if planning_mode != 'General trajectory optimizer (experimental)' and any(float(x.get('dip_deg',0.0) or 0.0)>0 or x.get('approach_azimuth_enabled') or x.get('approach_inclination_enabled') or x.get('intersection_angle_enabled') for x in target_sequence):
-        st.warning('One or more selected targets have orientation or approach constraints. The legacy profile optimizer does not enforce these properties; use General trajectory optimizer (experimental) to include them in candidate generation and validation.')
-    a,b,c,d=st.columns(4); kop_ft=a.number_input('KOP MD (ft)',0.,49213.,float(project['well_architecture'].get('kop_md_m') or 1450)*M_TO_FT); br_ft=b.number_input('Build rate (°/100 ft)',.1,15.,3.0); hold=c.number_input('Peak/hold inclination (°)',1.,max(1.0,max_inc),default_hold,help='Peak inclination for the selected profile. Horizontal uses 90°; ERD uses at least 75° and is capped at 88°. Optimization searches within the permitted range.'); az=d.number_input('Planning azimuth (° Grid)',0.,360.,default_az)
-    kop_window_min_ft, kop_window_max_ft = None, None
-    if planning_mode == 'Optimize (KOP window)':
-        ka, kb = st.columns(2)
-        kop_window_min_ft = ka.number_input('Minimum permitted KOP MD (ft)', 0.0, 49213.0, max(0.0, kop_ft-100.0), key='kop_window_min_ft', help='Set this from known formation/lithology and offset-well experience.')
-        kop_window_max_ft = kb.number_input('Maximum permitted KOP MD (ft)', 0.0, 49213.0, min(49213.0, kop_ft+100.0), key='kop_window_max_ft', help='The optimizer cannot move KOP outside this interval.')
-        if kop_window_min_ft > kop_window_max_ft:
-            st.error('Minimum KOP must not exceed maximum KOP.')
-    a,b,c=st.columns(3); dr_ft=a.number_input('Drop rate (°/100 ft)',.1,15.,3.0,help='Used by S-Profile and Build-Hold-Drop.'); final_inc=b.number_input('Final inclination after drop (°)',0.,max(1.0,max_inc),0.0,help='Used by S-Profile and Build-Hold-Drop.'); turn_ft=c.number_input('Azimuth turn rate (°/100 ft)',-15.0,15.0,0.0,help='Signed continuous azimuth change beginning at KOP. Zero keeps constant azimuth. Optimized mode searches within the project turn-rate limit.')
-    a,b,c=st.columns(3); a.number_input('Target TVD (ft)',0.,49213.,target_tvd*M_TO_FT,disabled=True); b.number_input('Target Northing offset (ft)',-3280840.,3280840.,rel_n*M_TO_FT,disabled=True); c.number_input('Target Easting offset (ft)',-3280840.,3280840.,rel_e*M_TO_FT,disabled=True)
-    st.caption(f'Maximum inclination constraint: **{max_inc:.1f}°** • Target azimuth from project-grid geometry: **{default_az:.2f}° Grid**')
-    kop=kop_ft*FT_TO_M; br=dls_100ft_to_30m(br_ft); td=target_tvd; n=rel_n; e=rel_e
+    profile=saved_profile
+    planning_mode='Trajectory Optimizer'
+    st.markdown('### Trajectory constraints')
+    dc=project.get('design_constraints',{})
+    c1,c2,c3,c4=st.columns(4)
+    max_inc=float(c1.number_input('Maximum inclination (°)', min_value=1.0, max_value=90.0, value=float(dc.get('max_inclination_deg',70.0) or 70.0), key='unified_max_inc'))
+    max_dls_ft=float(c2.number_input('Maximum DLS (°/100 ft)', min_value=0.1, max_value=15.0, value=float(dls_30m_to_100ft(dc.get('max_dls_deg_30m',3.0) or 3.0)), key='unified_max_dls'))
+    max_build_ft=float(c3.number_input('Maximum build rate (°/100 ft)', min_value=0.1, max_value=15.0, value=float(dls_30m_to_100ft(dc.get('max_build_rate_deg_30m',3.0) or 3.0)), key='unified_max_build'))
+    max_drop_ft=float(c4.number_input('Maximum drop rate (°/100 ft)', min_value=0.1, max_value=15.0, value=float(dls_30m_to_100ft(dc.get('max_drop_rate_deg_30m',dc.get('max_build_rate_deg_30m',3.0)) or 3.0)), key='unified_max_drop'))
+    c5,c6=st.columns(2)
+    max_turn_ft=float(c5.number_input('Maximum azimuth turn rate (°/100 ft)', min_value=0.1, max_value=15.0, value=float(dls_30m_to_100ft(dc.get('max_turn_rate_deg_30m',3.0) or 3.0)), key='unified_max_turn'))
+    effort=c6.selectbox('Optimization effort',['Fast','Balanced','Thorough'],index=1,key='unified_effort',help='Presets control the global wall-clock budget and solver iteration limit. Detailed counts are shown in diagnostics.')
+    effort_config={'Fast':{'budget':30,'iterations':40,'section_share':0.20},'Balanced':{'budget':90,'iterations':80,'section_share':0.20},'Thorough':{'budget':180,'iterations':140,'section_share':0.20}}
+    search_budget_s=float(effort_config[effort]['budget']); max_iter_general=int(effort_config[effort]['iterations'])
+    st.caption(f'{effort} effort: up to {search_budget_s:.0f} seconds total search budget, including section reconstruction. Build, drop, DLS and turn constraints are independently enforced and revalidated.')
+
+    st.markdown('### Kickoff point (KOP)')
+    kop_mode_ui=st.radio('KOP constraint',['Automatic','Fixed MD','Within tolerance'],horizontal=True,key='unified_kop_mode',help='Automatic lets the optimizer choose KOP. Fixed MD constrains it to one measured depth. Within tolerance searches only inside the specified ± window.')
+    kop_ref_ft=float(project.get('well_architecture',{}).get('kop_md_m') or 1450.0*FT_TO_M)*M_TO_FT
+    kop_md_ft=None; kop_tolerance_ft=0.0; min_kop_m=None; max_kop_m=None
+    if kop_mode_ui!='Automatic':
+        ka,kb=st.columns(2)
+        kop_md_ft=float(ka.number_input('Reference KOP MD (ft)',min_value=0.0,max_value=100000.0,value=float(kop_ref_ft),step=25.0,key='unified_kop_md_ft'))
+        if kop_mode_ui=='Within tolerance':
+            kop_tolerance_ft=float(kb.number_input('KOP tolerance ± (ft)',min_value=0.0,max_value=10000.0,value=100.0,step=25.0,key='unified_kop_tolerance_ft'))
+        else:
+            kb.number_input('KOP tolerance ± (ft)',min_value=0.0,max_value=0.0,value=0.0,disabled=True,key='unified_kop_tolerance_fixed')
+        min_kop_m=max(0.0,(kop_md_ft-kop_tolerance_ft)*FT_TO_M); max_kop_m=(kop_md_ft+kop_tolerance_ft)*FT_TO_M
+
+    st.markdown('### Search and clearance')
+    gc1,gc2=st.columns(2)
+    min_clearance_ft=float(gc1.number_input('Minimum centreline clearance (ft)',min_value=0.0,max_value=5000.0,value=float(st.session_state.get('general_min_clearance_ft',100.0)),key='general_min_clearance_ft',help='Additional geometric clearance used during route search; not a substitute for uncertainty-based anti-collision criteria.'))
+    min_sf=float(gc2.number_input('Required separation factor',min_value=0.1,max_value=10.0,value=float(st.session_state.get('general_min_sf',2.0)),key='general_min_sf',help='Use company-approved criteria for operational work.'))
     configured_td=project.get('well_architecture',{}).get('planned_td_md_m')
-    internal_search_ceiling=max(td + 4000.0, td * 3.0, 3000.0)
-    use_max_md_limit=st.checkbox('Apply an explicit maximum MD constraint', value=False, help='Off by default: the planner calculates TD from the final required target. Turn this on only when the design has a genuine maximum measured-depth limit.')
+    internal_search_ceiling=max(target_tvd + 4000.0, target_tvd * 3.0, 3000.0)
+    use_max_md_limit=st.checkbox('Apply an explicit maximum MD constraint',value=False,help='Off by default. The final TD is determined by target interception.')
     if use_max_md_limit:
         default_limit_ft=float(configured_td)*M_TO_FT if configured_td and float(configured_td)>0 else internal_search_ceiling*M_TO_FT
-        max_md_limit_ft=st.number_input('Maximum permitted MD (ft)', min_value=100.0, max_value=100000.0, value=float(min(100000.0,max(100.0,default_limit_ft))), step=100.0)
+        max_md_limit_ft=float(st.number_input('Maximum permitted MD (ft)',min_value=100.0,max_value=100000.0,value=float(min(100000.0,max(100.0,default_limit_ft))),step=100.0,key='unified_max_md_ft'))
         provisional_md_limit=max_md_limit_ft*FT_TO_M
     else:
         provisional_md_limit=internal_search_ceiling
-        st.caption(f'No maximum MD constraint applied. Internal search ceiling: {provisional_md_limit*M_TO_FT:,.0f} ft MD; final planned TD is calculated from target interception.')
-    if target_tvd <= 0: st.error('Target TVD must be positive after applying the KB/TVDSS reference conversion.'); st.stop()
-    max_build_ft=dls_30m_to_100ft(float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',br)))
-    if br_ft > max_build_ft+1e-9: st.warning(f'Build rate exceeds the project maximum build-rate constraint of {max_build_ft:.2f}°/100 ft.')
-    if profile not in ('Vertical',) and hold > max_inc and profile not in ('Horizontal',): st.error('Peak/hold inclination exceeds the project maximum inclination constraint.')
-    if abs(az-default_az)>0.05: st.warning(f'Planning azimuth differs from the target-center azimuth by {abs(az-default_az):.2f}°. The candidate may not be target-center aligned.')
-    if planning_mode == 'General trajectory optimizer (experimental)':
-        st.warning('Experimental general optimizer. Offset avoidance uses a conservative screening envelope, followed by covariance-based clearance screening. This is not a certified operational anti-collision system.')
-        gc1,gc2,gc3=st.columns(3)
-        gc1.number_input('Minimum centreline clearance (ft)', min_value=0.0, max_value=5000.0, value=float(st.session_state.get('general_min_clearance_ft',100.0)), key='general_min_clearance_ft', help='Additional minimum geometric clearance used during route search; not a substitute for the required uncertainty-based separation-factor criterion.')
-        gc2.number_input('Required separation factor', min_value=0.1, max_value=10.0, value=float(st.session_state.get('general_min_sf',2.0)), key='general_min_sf', help='Final clearance screening threshold. Company-approved criteria and validated uncertainty models are required for operational use.')
-        gc3.number_input('Optimizer iterations', min_value=10, max_value=300, value=int(st.session_state.get('general_max_iter',60)), step=10, key='general_max_iter')
-        general_section_on=bool(st.session_state.get('general_section_reopt',True)); general_section_budget_s=float(st.session_state.get('general_section_budget',20))
-        sc1,sc2=st.columns(2)
-        general_section_on=sc1.checkbox('Stage 2: reconstruct into sections and re-optimize', value=bool(st.session_state.get('general_section_reopt',True)), key='general_section_reopt', help='After a validated feasible trajectory is found, rebuild it from vertical/build/tangent/drop/turn sections, re-optimize KOP, section lengths and rates, and regenerate the survey from the section parameters. The original feasible trajectory is kept if the section plan does not validate.')
-        general_section_budget_s=sc2.number_input('Stage 2 time budget (s)', min_value=5, max_value=300, value=int(st.session_state.get('general_section_budget',20)), step=5, key='general_section_budget')
-        st.number_input('Search time budget (s)', min_value=10, max_value=600, value=int(st.session_state.get('general_time_budget',90)), step=10, key='general_time_budget', help='Upper limit on search time. If it is reached without a validated candidate the result is NO FEASIBLE CANDIDATE FOUND (a failed search, not a proof of infeasibility).')
-    st.caption(f'Current design preset: **{saved_profile}**. Selected calculation profile: **{profile}**. The stored survey changes only when you generate the trajectory.')
-    if st.button('Generate trajectory for selected shape',type='primary'):
+        st.caption(f'No explicit maximum MD constraint. Internal search ceiling: {provisional_md_limit*M_TO_FT:,.0f} ft MD.')
+    if target_tvd<=0: st.error('Target TVD must be positive after applying the KB/TVDSS reference conversion.'); st.stop()
+    st.warning('Planning outputs are engineering-development candidates. Review trajectory constraints, target interception, survey uncertainty and anti-collision results before operational use.')
+
+    if st.button('Optimize trajectory',type='primary',use_container_width=True):
         try:
-            requested_peak = 0.0 if profile == 'Vertical' else (90.0 if profile == 'Horizontal' else (min(max(hold,75.0),88.0) if profile == 'ERD' else hold))
-            if planning_mode != 'General trajectory optimizer (experimental)' and requested_peak > max_inc + 1e-9:
-                raise ValueError(f'{profile} requires a peak inclination of {requested_peak:.1f}°, above the project maximum inclination of {max_inc:.1f}°. Update the design constraint first if this profile is intended.')
-            if planning_mode == 'General trajectory optimizer (experimental)':
-                collision_col1, collision_col2, collision_col3 = st.columns(3)
-                # Values are read from stable Streamlit session keys on the next rerun;
-                # defaults are conservative screening inputs, not operational standards.
-                min_clearance_ft = float(st.session_state.get('general_min_clearance_ft', 100.0))
-                min_sf = float(st.session_state.get('general_min_sf', 2.0))
-                max_iter_general = int(st.session_state.get('general_max_iter', 60))
-                sigma_params = dict(project.get('survey_metadata', {}).get('survey_error_parameters', {}))
-                out,meta=optimize_general_trajectory(
-                    targets=target_sequence,
-                    max_md_m=provisional_md_limit,
-                    max_inclination_deg=max_inc,
-                    max_dls_deg_30m=float(project.get('design_constraints',{}).get('max_dls_deg_30m',3.0) or 3.0),
-                    max_build_rate_deg_30m=float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',3.0) or 3.0),
-                    max_turn_rate_deg_30m=float(project.get('design_constraints',{}).get('max_turn_rate_deg_30m',3.0) or 3.0),
-                    station_interval_m=30.0, maxiter=max_iter_general,
-                    surface_easting_m=surface_e, surface_northing_m=surface_n,
-                    offsets=project.get('offsets', []),
-                    min_centerline_separation_m=min_clearance_ft*FT_TO_M,
-                    required_separation_factor=min_sf,
-                    uncertainty_parameters=sigma_params,
-                    target_tolerance_m=30.48, control_points=6,
-                    kb_m=float(project.get('kb_m',0) or 0), time_budget_s=float(st.session_state.get('general_time_budget',90)),
-                    section_reoptimize=bool(general_section_on), section_time_budget_s=float(general_section_budget_s),
-                )
-                meta=dict(meta); meta['planning_mode']=planning_mode
-                meta['profile']='General control-point trajectory'
-            elif planning_mode != 'Manual profile':
-                target_geometry=dict(t)
-                target_geometry['north_m']=rel_n
-                target_geometry['east_m']=rel_e
-                out,meta=optimize_trajectory(
-                    profile=profile, target_tvd_m=td, target_north_m=n, target_east_m=e,
-                    kop_initial_m=kop, build_rate_initial_deg_30m=br,
-                    peak_inc_initial_deg=requested_peak, azimuth_initial_deg=az,
-                    max_inclination_deg=max_inc,
-                    max_dls_deg_30m=float(project.get('design_constraints',{}).get('max_dls_deg_30m',3.0) or 3.0),
-                    max_build_rate_deg_30m=float(project.get('design_constraints',{}).get('max_build_rate_deg_30m',3.0) or 3.0),
-                    max_turn_rate_deg_30m=float(project.get('design_constraints',{}).get('max_turn_rate_deg_30m',3.0) or 3.0),
-                    drop_rate_initial_deg_30m=dls_100ft_to_30m(dr_ft), final_inc_initial_deg=final_inc,
-                    target_geometry=target_geometry, point_tolerance_m=float(t.get('tolerance_m',30.48) or 30.48),
-                    station_interval_m=60.0, max_md_m=provisional_md_limit,
-                    kop_mode=('fixed' if planning_mode == 'Optimize (fixed KOP)' else 'window' if planning_mode == 'Optimize (KOP window)' else 'free'),
-                    kop_window_min_m=(kop_window_min_ft*FT_TO_M if kop_window_min_ft is not None else None),
-                    kop_window_max_m=(kop_window_max_ft*FT_TO_M if kop_window_max_ft is not None else None),
-                    target_sequence=target_sequence if multi_target else None,
-                )
-                meta=dict(meta); meta['planning_mode']=planning_mode
-            else:
-                if multi_target:
-                    raise ValueError('Multiple-target planning requires an optimization mode. Select Optimize (free KOP), Optimize (fixed KOP), or Optimize (KOP window) so the full ordered target sequence is evaluated.')
-                out,meta=generate_profile_candidate(profile,kop,br,hold,az,td,n,e,drop_rate_deg_30m=dls_100ft_to_30m(dr_ft),final_inc_deg=final_inc,station_interval=30,max_md=provisional_md_limit,truncate_at_target=False,azimuth_turn_rate_deg_30m=dls_100ft_to_30m(turn_ft))
-                max_turn=float(project.get('design_constraints',{}).get('max_turn_rate_deg_30m',3.0) or 3.0)
-                meta['max_turn_rate_actual_deg_30m']=abs(dls_100ft_to_30m(turn_ft))
-                meta['constraint_violations']=[name for name,failed in [('maximum_turn_rate',abs(meta['max_turn_rate_actual_deg_30m'])>max_turn+1e-6),('maximum_DLS',float(out['DLS'].max())>float(project.get('design_constraints',{}).get('max_dls_deg_30m',3.0))+1e-6),('maximum_inclination',float(out['Inc'].max())>max_inc+1e-6)] if failed]
-                if meta['constraint_violations'] or not meta.get('target_hit',False):
-                    meta['status']='REVIEW'
-                meta['optimization_status']='FEASIBLE' if meta['status']=='PASS' else 'REVIEW'
-                meta['final_md_is_target_intercept']=False
-                if meta['status']=='PASS' and meta.get('target_intercept_md_m') is not None:
-                    out=truncate_trajectory_at_md(out,meta['target_intercept_md_m'])
-                    meta['final_md_m']=float(out['MD'].iloc[-1])
-                    meta['endpoint_north_m']=float(out['Northing'].iloc[-1])
-                    meta['endpoint_east_m']=float(out['Easting'].iloc[-1])
-                    meta['endpoint_tvd_m']=float(out['TVD'].iloc[-1])
-                    meta['final_inclination_deg']=float(out['Inc'].iloc[-1])
-                    meta['final_md_is_target_intercept']=True
-                meta=dict(meta); meta['planning_mode']='Manual profile'
-            # ---- Independent acceptance for EVERY planning mode --------------------------------------
+            sigma_params=dict(project.get('survey_metadata',{}).get('survey_error_parameters',{}))
+            out,meta=optimize_general_trajectory(
+                targets=target_sequence,
+                max_md_m=provisional_md_limit,
+                max_inclination_deg=max_inc,
+                max_dls_deg_30m=dls_100ft_to_30m(max_dls_ft),
+                max_build_rate_deg_30m=dls_100ft_to_30m(max_build_ft),
+                max_drop_rate_deg_30m=dls_100ft_to_30m(max_drop_ft),
+                max_turn_rate_deg_30m=dls_100ft_to_30m(max_turn_ft),
+                station_interval_m=30.0, maxiter=max_iter_general,
+                surface_easting_m=surface_e, surface_northing_m=surface_n,
+                offsets=project.get('offsets',[]),
+                min_centerline_separation_m=min_clearance_ft*FT_TO_M,
+                required_separation_factor=min_sf,
+                uncertainty_parameters=sigma_params,
+                target_tolerance_m=30.48, control_points=6,
+                kb_m=float(project.get('kb_m',0) or 0), time_budget_s=search_budget_s,
+                min_kop_md_m=min_kop_m, max_kop_md_m=max_kop_m,
+                section_reoptimize=True, section_time_budget_s=search_budget_s*effort_config[effort]['section_share'],
+            )
+            meta=dict(meta); meta['planning_mode']=planning_mode; meta['profile']='General control-point trajectory'
+            meta['effort_preset']=effort; meta['configured_constraints']={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft),'max_build_rate_deg_30m':dls_100ft_to_30m(max_build_ft),'max_drop_rate_deg_30m':dls_100ft_to_30m(max_drop_ft),'max_turn_rate_deg_30m':dls_100ft_to_30m(max_turn_ft)}
+            meta['kop_mode_ui']=kop_mode_ui; meta['kop_reference_md_ft']=kop_md_ft; meta['kop_tolerance_ft']=kop_tolerance_ft
+    # ---- Independent acceptance for EVERY planning mode --------------------------------------
             # A generator's or optimizer's own verdict never decides validity. The candidate is rebuilt
             # from MD/Inc/Azi and re-checked (constraints between stations, ordered target interception,
             # termination at the final target, offset clearance) before it can be PASS.
-            _dc=project.get('design_constraints',{})
-            _req_sf=float(st.session_state.get('general_min_sf', project.get('anti_collision_criteria',{}).get('required_sf',2.0)))
+            _req_sf=float(min_sf)
             _val=validate_trajectory(out[['MD','Inc','Azi']], targets=target_sequence,
-                constraints={'max_inclination_deg':max_inc,'max_dls_deg_30m':float(_dc.get('max_dls_deg_30m',3.0) or 3.0),
-                             'max_build_rate_deg_30m':float(_dc.get('max_build_rate_deg_30m',3.0) or 3.0),
-                             'max_turn_rate_deg_30m':float(_dc.get('max_turn_rate_deg_30m',3.0) or 3.0)},
+                constraints={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft),
+                             'max_build_rate_deg_30m':dls_100ft_to_30m(max_build_ft),'max_drop_rate_deg_30m':dls_100ft_to_30m(max_drop_ft),
+                             'max_turn_rate_deg_30m':dls_100ft_to_30m(max_turn_ft),'max_md_m':provisional_md_limit,
+                             'min_kop_md_m':min_kop_m,'max_kop_md_m':max_kop_m},
                 offsets=project.get('offsets',[]), surface_easting_m=surface_e, surface_northing_m=surface_n,
                 kb_m=float(project.get('kb_m',0) or 0), survey_error_model=dict(project.get('survey_metadata',{}).get('survey_error_parameters',{})),
                 required_separation_factor=_req_sf, default_target_tolerance_m=30.48)
@@ -763,7 +759,7 @@ elif page=='Trajectory Planner':
                     project['survey_backup']={'surveys':_prev_surveys,'trajectory_metadata':_prev_traj_meta,'saved_utc':datetime.utcnow().isoformat()+'Z','reason':'Replaced by a validated planner trajectory.'}
                 project['surveys']=records
             project['well_design']=profile
-            project['trajectory_metadata']={'planner':meta.get('planner', 'Profile-aware multi-parameter optimizer' if planning_mode != 'Manual profile' else 'Piecewise profile candidate'),'planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z','survey_source':'planned'}
+            project['trajectory_metadata']={'planner':meta.get('planner', 'General control-point trajectory optimizer'),'planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z','survey_source':'planned'}
             project['planned_trajectory_metadata']=dict(project['trajectory_metadata'])
             attach_snapshot(project, project['planned_trajectory_metadata'], [x['name'] for x in target_sequence])
             if meta.get('status')=='PASS': project['trajectory_metadata']=dict(project['planned_trajectory_metadata'])
@@ -806,7 +802,7 @@ elif page=='Trajectory Planner':
                 if col in seq_display: seq_display[col.replace('_m','_ft')]=seq_display[col]*M_TO_FT
             st.dataframe(seq_display.drop(columns=[c for c in ['intercept_md_m','lateral_error_m','vertical_error_m','miss_distance_m'] if c in seq_display]),use_container_width=True,hide_index=True)
             st.caption('All required targets must be intercepted in order. The final required target defines the target-terminated TD when the complete trajectory is feasible.')
-        if meta.get('section_schedule') is not None and saved_mode == 'General trajectory optimizer (experimental)':
+        if meta.get('section_schedule') is not None and saved_mode in ('General trajectory optimizer (experimental)', 'Trajectory Optimizer'):
             st.markdown('#### Section schedule')
             _sstat=meta.get('section_reconstruction_status','—')
             (st.success if _sstat=='REOPTIMIZED' else st.info if _sstat in ('CLASSIFIED_ONLY','NOT_ATTEMPTED_INFEASIBLE_BASE') else st.warning)(f"Stage 2 section reconstruction: **{_sstat}** • trajectory source: **{meta.get('final_trajectory_source','—')}**. {meta.get('section_reconstruction_note','')}")
@@ -834,12 +830,14 @@ elif page=='Trajectory Planner':
                 st.markdown('#### Constraint margins')
                 _m=pd.DataFrame(_mrows); st.dataframe(_m.astype({c:'object' for c in _m.columns}),use_container_width=True,hide_index=True)
                 st.caption('Margin = limit − value (positive is inside the limit; units: m, deg or deg/30 m as stored). Target rows show the negative miss distance. Failed checks are listed above under constraint violations.')
-        if saved_mode in ('Optimize selected profile to target', 'Optimize (free KOP)', 'Optimize (fixed KOP)', 'Optimize (KOP window)', 'General trajectory optimizer (experimental)'):
+        if saved_mode in ('Optimize selected profile to target', 'Optimize (free KOP)', 'Optimize (fixed KOP)', 'Optimize (KOP window)', 'General trajectory optimizer (experimental)', 'Trajectory Optimizer'):
             st.metric('Optimization outcome',meta.get('optimization_status','REVIEW'))
             st.caption(f"Objective score: {float(meta.get('objective_m',float('nan'))):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {float(meta.get('max_dls_deg_30m',float('nan'))):.2f}°/30 m")
             if meta.get('optimization_status')!='FEASIBLE': st.warning('No candidate met all current target and trajectory constraints. The best candidate is shown for review; constraints have not been relaxed.')
-            if saved_mode == 'General trajectory optimizer (experimental)':
-                st.caption(f"Optimizer: {meta.get('optimizer','—')} • Iterations: {meta.get('optimizer_iterations','—')} • Message: {meta.get('optimizer_message','—')}")
+            if saved_mode in ('General trajectory optimizer (experimental)', 'Trajectory Optimizer'):
+                st.caption(f"Optimizer: {meta.get('optimizer','—')} • Iterations: {meta.get('optimizer_iterations','—')} • Solves: {meta.get('search_solves',meta.get('optimizer_solves','—'))} • Elapsed: {meta.get('search_seconds','—')} s / {meta.get('search_budget_s','—')} s • Message: {meta.get('optimizer_message','—')}")
+                if meta.get('effort_preset'): st.caption(f"Effort preset: {meta.get('effort_preset')} • Global budget exhausted: {meta.get('search_budget_exhausted',False)} • KOP mode: {meta.get('kop_mode_ui','Automatic')}")
+                if meta.get('max_drop_rate_actual_deg_30m') is not None: st.caption(f"Validated maximum drop rate: {dls_30m_to_100ft(float(meta.get('max_drop_rate_actual_deg_30m',0))):.2f}°/100 ft")
                 if meta.get('constraint_violations'):
                     st.error('Constraint checks requiring review: ' + ', '.join(meta.get('constraint_violations', [])))
                 if meta.get('collision_validation'):

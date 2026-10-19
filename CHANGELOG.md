@@ -201,3 +201,12 @@ See `GAP_ANALYSIS.md` for evidence, tests and open items.
 - Added `core.section_reconstruction` to classify an accepted trajectory into vertical, build, drop, tangent, turn and combined sections and calculate schedule-level DLS/build/drop/turn checks.
 - General optimizer metadata now exposes the section schedule and explicitly labels the current implementation `CLASSIFIED_ONLY`; it does not yet perform section-parameter re-optimization or replace the original trajectory.
 - Targeted section/geodesy tests passed. Broader validation/app tests exceeded the available runtime and are not claimed as passed.
+
+## Unified Trajectory Optimizer update (2026-10-18)
+
+- Consolidated the Trajectory Planner into one general-optimizer workflow.
+- Added independent maximum build/drop-rate controls and validator checks.
+- Added automatic, fixed-MD, and tolerance-window KOP constraints in feet.
+- Added Fast/Balanced/Thorough global search presets and shared time budgeting for section reconstruction.
+- Added diagnostics and regression tests; preserve the validated general trajectory when section reconstruction cannot be adopted.
+- See `UNIFIED_TRAJECTORY_OPTIMIZER_UPDATE.md` for implementation notes and limitations.
