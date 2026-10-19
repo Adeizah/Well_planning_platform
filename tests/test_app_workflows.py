@@ -35,17 +35,23 @@ def test_target_can_be_added_and_edited_and_editing_marks_the_plan_for_review():
     assert err is None and t['name'] == 'T1-renamed' and abs(t['tolerance_m'] - 60.0 * 0.3048) < 1e-6
 
 
-def test_failed_manual_candidate_never_overwrites_the_measured_survey():
-    fake, err = run_app('Trajectory Planner', _project(), overrides={'Planning mode': 'Manual profile', 'Well trajectory shape': 'J-Profile', 'Peak/hold inclination (°)': 20.0},
-                        clicks=['Generate trajectory for selected shape'])
+def test_unified_optimizer_uses_the_configured_build_drop_constraints():
+    p = _project()
+    fake, err = run_app('Trajectory Planner', p, overrides={
+        'Maximum build rate (°/100 ft)': 2.0,
+        'Maximum drop rate (°/100 ft)': 1.5,
+        'Optimization effort': 'Fast',
+    }, clicks=['Optimize trajectory'])
     pr = fake.session_state['project']; res = pr['planned_trajectory_metadata']['planner_result']
-    assert err is None and res['status'] == 'REVIEW' and res['validation_status'] == 'REVIEW'
-    assert pr['surveys'] == MEASURED and len(pr['planned_surveys']) > 3
+    assert err is None
+    assert res['configured_constraints']['max_build_rate_deg_30m'] == 2.0 * 30.0 / 30.48
+    assert res['configured_constraints']['max_drop_rate_deg_30m'] == 1.5 * 30.0 / 30.48
+    assert res['effort_preset'] == 'Fast'
 
 
 def test_validated_general_plan_becomes_active_and_measured_survey_is_backed_up():
-    fake, err = run_app('Trajectory Planner', _project(), overrides={'Planning mode': 'General trajectory optimizer (experimental)', 'general_time_budget': 60, 'general_max_iter': 40},
-                        clicks=['Generate trajectory for selected shape'])
+    fake, err = run_app('Trajectory Planner', _project(), overrides={'Optimization effort': 'Fast'},
+                        clicks=['Optimize trajectory'])
     pr = fake.session_state['project']; res = pr['planned_trajectory_metadata']['planner_result']
     assert err is None and res['status'] == 'PASS' and res['validation_status'] == 'PASS'
     assert len(pr['surveys']) > 3 and pr['survey_backup']['surveys'] == MEASURED
@@ -59,16 +65,10 @@ def test_validated_general_plan_becomes_active_and_measured_survey_is_backed_up(
 
 
 def test_planner_page_runs_stage2_and_stores_section_schedule_and_comparison():
-    fake, err = run_app('Trajectory Planner', _project(), overrides={'Planning mode': 'General trajectory optimizer (experimental)', 'general_time_budget': 60, 'general_max_iter': 40,
-                                                                    'general_section_reopt': True, 'general_section_budget': 20},
-                        clicks=['Generate trajectory for selected shape'])
+    fake, err = run_app('Trajectory Planner', _project(), overrides={'Optimization effort': 'Fast'},
+                        clicks=['Optimize trajectory'])
     pr = fake.session_state['project']; res = pr['planned_trajectory_metadata']['planner_result']
     assert err is None and res['status'] == 'PASS'
     assert res['section_reconstruction_status'] in ('REOPTIMIZED', 'RETAINED_ORIGINAL_RECONSTRUCTION_FAILED', 'RETAINED_ORIGINAL_SECTION_PLAN_TOO_LONG')
     assert res['section_schedule'] and res['stage1_metrics'] and res['final_metrics']
     assert res['final_metrics']['validation_status'] == 'PASS'      # never a successful label on an invalid plan
-    # opting out keeps Stage 1 and says so explicitly
-    fake2, err2 = run_app('Trajectory Planner', _project(), overrides={'Planning mode': 'General trajectory optimizer (experimental)', 'general_time_budget': 60, 'general_max_iter': 40,
-                                                                      'general_section_reopt': False}, clicks=['Generate trajectory for selected shape'])
-    r2 = fake2.session_state['project']['planned_trajectory_metadata']['planner_result']
-    assert err2 is None and r2['section_reconstruction_status'] == 'CLASSIFIED_ONLY'

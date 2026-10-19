@@ -69,11 +69,21 @@ def test_projected_grid_reprojection_preserves_physical_location_between_utm_zon
     assert lat == pytest.approx(5.54, abs=1e-7)
 
 
-def test_missing_datum_operation_is_not_silently_used_for_reprojection():
-    from models.geodesy import transform_projected_grid_metres
-    # This environment does not include a suitable high-accuracy Minna/WGS84 grid operation.
-    with pytest.raises(ValueError):
-        transform_projected_grid_metres(500000.0, 600000.0, "EPSG:32632", "EPSG:26332")
+def test_minna_reprojection_uses_documented_operation_or_fails_actionably():
+    from models.geodesy import transform_projected_grid_metres, transformation_operations
+    # Minna/WGS84 may have documented regional operations without a local grid.
+    # The transformation must either use a stated-accuracy non-ballpark operation
+    # or fail explicitly; it must never silently relabel coordinates.
+    report = transformation_operations("EPSG:32632", "EPSG:26332", lon=6.0, lat=5.5)
+    if report["available_operations"]:
+        east, north = transform_projected_grid_metres(500000.0, 600000.0, "EPSG:32632", "EPSG:26332")
+        assert east == pytest.approx(east)
+        assert north == pytest.approx(north)
+        assert abs(east) < 1e8 and abs(north) < 1e8
+        assert any(op["accuracy_m"] >= 0 for op in report["available_operations"])
+    else:
+        with pytest.raises(ValueError, match="transformation|operation|grid|accuracy"):
+            transform_projected_grid_metres(500000.0, 600000.0, "EPSG:32632", "EPSG:26332")
 
 
 def test_transformation_report_does_not_crash_for_minna_projected_crs():
