@@ -44,3 +44,36 @@ def test_unified_optimizer_ui_has_single_mode_and_global_effort_presets():
     assert "['Automatic','Fixed MD','Within tolerance']" in text
     assert "max_drop_rate_deg_30m=dls_100ft_to_30m(max_drop_ft)" in text
     assert "min_kop_md_m=min_kop_m, max_kop_md_m=max_kop_m" in text
+
+
+def test_search_explores_shortlist_and_validates_candidates_individually():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / 'core' / 'general_optimizer.py').read_text()
+    assert 'if n_feasible >= 2' not in source
+    assert 'validated_candidates.append' in source
+    assert 'for _, ev_cand, x_cand, res_cand in sorted(validated_candidates' in source
+    assert "'stage1_summary'" in source
+    assert "'stage2_summary'" in source
+
+
+def test_section_optimizer_uses_distinct_drop_bound():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / 'core' / 'section_optimizer.py').read_text()
+    assert 'md = float(limits.get("max_drop_rate_deg_30m", mb))' in source
+    assert '(-md, mb)' in source
+
+
+def test_planner_quantizes_accepted_angles_before_revalidation_and_rebuilds_geometry():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / 'app.py').read_text()
+    inc_round = "out['Inc']=pd.to_numeric(out['Inc'],errors='raise').round(2)"
+    azi_round = "out['Azi']=(pd.to_numeric(out['Azi'],errors='raise').round(2) % 360.0).round(2)"
+    rebuild = "out=minimum_curvature(out[['MD','Inc','Azi']])"
+    validator = "_val=validate_trajectory(out[['MD','Inc','Azi']]"
+    assert inc_round in source
+    assert azi_round in source
+    assert rebuild in source
+    assert source.index(inc_round) < source.index(validator)
+    assert source.index(azi_round) < source.index(validator)
+    assert source.index(rebuild) < source.index(validator)
+    assert "meta['trajectory_angle_precision_deg']=2" in source
