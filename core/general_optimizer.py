@@ -630,28 +630,31 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
             cands.insert(0, resample_x(prev_x, prev_N, N))
         scored = []
         for x in cands:
+            if over_budget():
+                break
             try:
                 scored.append((evaluate(x, N)['score'], x))
             except Exception:
                 continue
         scored.sort(key=lambda p: p[0])
-        # More independent starts improve recovery when an early mandatory target
-        # is missed by the first local basin. The wall-clock budget still governs
-        # how many solves can actually run.
+        # Explore the full shortlist (up to six starts). A preliminary-feasible
+        # candidate is not enough: each candidate must pass the independent
+        # validator, otherwise the search continues to the next start.
         starts = [x for _, x in scored[:6]]
-        stage_best = None; n_feasible = 0
-        for x0 in starts:                                   # compare starts, but stop once two feasible ones exist (Stage 2 reshapes the plan anyway)
-            if over_budget() and stage_best is not None:
+        stage_best = None
+        validated_candidates = []
+        for x0 in starts:
+            if over_budget():
                 break
-            if n_feasible >= 2:
-                break
-            res = local_solve(x0, N, maxiter); total_iters += int(getattr(res, 'nit', 0)); total_solves += 1
+            res = local_solve(x0, N, maxiter)
+            total_iters += int(getattr(res, 'nit', 0)); total_solves += 1
             ev, xs = settle(res.x, N); res.x = xs
             better = stage_best is None or (ev['station_ok'] and not stage_best[0]['station_ok']) or \
                 (ev['station_ok'] == stage_best[0]['station_ok'] and ev['score'] < stage_best[0]['score'])
-            n_feasible += int(ev['station_ok'])
             if better:
                 stage_best = (ev, res.x, res)
+            if ev['station_ok']:
+                validated_candidates.append((ev['score'], ev, res.x, res))
         if stage_best is None:
             continue
         if not stage_best[0]['station_ok'] and not over_budget():
@@ -675,22 +678,36 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         if ev['score'] < best['score']:
             best = {'score': ev['score'], 'x': x_best, 'N': N, 'res': res, 'ev': ev}
         prev_x, prev_N = x_best, N
-        if ev['station_ok']:
-            val = run_validation(ev['path'])
-            tries = 0
-            while val['status'] != STATUS_PASS and tries < 3 and not over_budget() and prepared and \
-                    set(val['violations']) <= {'anti_collision_review_required', 'anti_collision_cross_check'}:
-                safety['value'] *= 1.5; tries += 1               # wider internal buffer, then re-solve from the best point
-                res2 = local_solve(x_best, N, maxiter); total_iters += int(getattr(res2, 'nit', 0)); total_solves += 1
-                ev, xs = settle(res2.x, N); res2.x = xs; x_best, res = xs, res2
-                if not ev['station_ok']:
-                    break
-                val = run_validation(ev['path'])
-            if val['status'] == STATUS_PASS:
-                accepted = {'x': x_best, 'N': N, 'ev': ev, 'val': val, 'res': res}
+        # Validate each preliminary-feasible candidate in score order. If one fails
+        # independent validation, do not let it hide a later candidate that passes.
+        for _, ev_cand, x_cand, res_cand in sorted(validated_candidates, key=lambda q: q[0]):
+            if over_budget():
                 break
-            if ev['score'] < best['score']:
-                best = {'score': ev['score'], 'x': x_best, 'N': N, 'res': res, 'ev': ev}
+            val_cand = run_validation(ev_cand['path'])
+            if val_cand['status'] == STATUS_PASS:
+                accepted = {'x': x_cand, 'N': N, 'ev': ev_cand, 'val': val_cand, 'res': res_cand}
+                break
+            # A narrowly scoped collision recovery may retry the same candidate,
+            # but never relaxes final validation requirements.
+            tries = 0
+            while val_cand['status'] != STATUS_PASS and tries < 2 and not over_budget() and prepared and \
+                    set(val_cand['violations']) <= {'anti_collision_review_required', 'anti_collision_cross_check'}:
+                safety['value'] *= 1.5; tries += 1
+                res2 = local_solve(x_cand, N, maxiter); total_iters += int(getattr(res2, 'nit', 0)); total_solves += 1
+                ev2, x2 = settle(res2.x, N); res2.x = x2
+                if not ev2['station_ok']:
+                    break
+                val_cand = run_validation(ev2['path'])
+                if val_cand['status'] == STATUS_PASS:
+                    accepted = {'x': x2, 'N': N, 'ev': ev2, 'val': val_cand, 'res': res2}
+                    break
+                x_cand, ev_cand, res_cand = x2, ev2, res2
+            if accepted is not None:
+                break
+        if accepted is not None:
+            break
+        if stage_best[0]['score'] < best['score']:
+            best = {'score': stage_best[0]['score'], 'x': stage_best[1], 'N': N, 'res': stage_best[2], 'ev': stage_best[0]}
 
     # ---- Stage 2: section reconstruction + re-optimisation (only from a validated Stage-1 plan) ------------
     section_result = {'attempted': False, 'status': 'NOT_ATTEMPTED_INFEASIBLE_BASE' if accepted is None else 'NOT_REQUESTED'}
@@ -721,7 +738,17 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
             N2 = bigger[0]
             try:
                 cands = [resample_x(accepted['x'], accepted['N'], N2)] + seeds(N2)[:6]
-                sc = sorted(((evaluate(x, N2)['score'], x) for x in cands), key=lambda p: p[0])
+                sc = []
+                for x in cands:
+                    if over_budget():
+                        break
+                    try:
+                        sc.append((evaluate(x, N2)['score'], x))
+                    except Exception:
+                        continue
+                if not sc:
+                    raise TimeoutError('Global search budget exhausted before challenger evaluation.')
+                sc.sort(key=lambda p: p[0])
                 res_c = local_solve(sc[0][1], N2, maxiter); total_iters += int(getattr(res_c, 'nit', 0)); total_solves += 1
                 ev_c, xc = settle(res_c.x, N2); res_c.x = xc
                 history.append({'control_points': N2, 'objective': ev_c['score'], 'station_level_feasible': ev_c['station_ok'], 'role': 'challenger'})
@@ -800,7 +827,9 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         'planner': 'General control-point trajectory optimizer (engineering-development)',
         'section_schedule': section_schedule,
         'section_reconstruction_status': sec_status,
-        'section_reconstruction_note': section_result.get('message') or ('Sections are classified from the accepted trajectory; no re-optimization was requested.' if sec_status == 'CLASSIFIED_ONLY' else 'Stage 2 was not run because no validated Stage-1 trajectory exists.'),
+        'section_reconstruction_note': section_result.get('message') or ('Sections classified from the accepted trajectory.' if sec_status == 'CLASSIFIED_ONLY' else 'Not attempted because Stage 1 did not produce a validated trajectory.'),
+        'stage1_summary': ('Validated trajectory found; all configured checks passed.' if feasible else ('Geometry screen indicates infeasibility under the current limits.' if screen['proven_infeasible'] else ('Search budget exhausted before a validated trajectory was found.' if over_budget() else 'No candidate passed all target and trajectory checks. This does not prove that no solution exists.'))),
+        'stage2_summary': ('Sectionized trajectory validated and adopted.' if section_result.get('adopted') else ('Not run because Stage 1 has no validated trajectory.' if not feasible else ('Sectionization time budget was exhausted.' if section_result.get('status') == 'SKIPPED_TIME_BUDGET' else 'Sectionization did not produce a valid replacement; the Stage 1 trajectory was retained.'))),
         'section_reoptimization': {k: v for k, v in section_result.items() if k in ('attempted', 'adopted', 'status', 'attempts', 'seconds', 'md_change_pct', 'mode')},
         'stage1_metrics': baseline_metrics, 'final_metrics': final_metrics,
         'final_trajectory_source': 'section parameters (Stage 2)' if section_result.get('adopted') else ('Stage-1 control-point trajectory' if feasible else 'best-effort candidate (not valid)'),

@@ -135,7 +135,8 @@ def reoptimize_sections(stage1_path, *, target_vectors, validate, limits, interv
     target_vectors(path_dict) -> (eq, ineq, penalty): equality residuals (exact point targets: path - target, metres),
         inequality margins (>= 0 satisfied) for areal targets / vertical bands, and a centre-preference penalty (metres).
     validate(DataFrame[MD, Inc, Azi]) -> validation dict (core.validation.validate_trajectory output).
-    limits: max_inclination_deg, max_dls_deg_30m, max_build_rate_deg_30m, max_turn_rate_deg_30m, max_md_m, min_kop_md_m.
+    limits: max_inclination_deg, max_dls_deg_30m, max_build_rate_deg_30m, max_drop_rate_deg_30m,
+    max_turn_rate_deg_30m, max_md_m, min_kop_md_m.
     """
     t0 = time.time()
     out = {"attempted": True, "adopted": False, "status": "RETAINED_ORIGINAL_RECONSTRUCTION_FAILED", "message": "", "attempts": []}
@@ -179,12 +180,16 @@ def _solve(azi0, secs0, mode, target_vectors, limits, interval_m, min_len, budge
     K = len(secs0)
     x0 = np.concatenate(([azi0], [s["length_m"] for s in secs0], [s["build_deg_30m"] for s in secs0], [s["turn_deg_30m"] for s in secs0]))
     sc = np.concatenate(([30.0], np.full(K, 100.0), np.ones(K), np.ones(K)))
-    mb, mt = float(limits["max_build_rate_deg_30m"]), float(limits["max_turn_rate_deg_30m"])
+    mb = float(limits["max_build_rate_deg_30m"])
+    md = float(limits.get("max_drop_rate_deg_30m", mb))
+    mt = float(limits["max_turn_rate_deg_30m"])
     kop_min = float(limits.get("min_kop_md_m") or 0.0)
     bnds = [(azi0 - 180.0, azi0 + 180.0)] + [(min_len, float(limits["max_md_m"]))] * K
     fixed_b = [mode == "practical" and abs(s["build_deg_30m"]) < RATE_SNAP_DEG_30M for s in secs0]
     fixed_t = [mode == "practical" and abs(s["turn_deg_30m"]) < RATE_SNAP_DEG_30M for s in secs0]
-    bnds += [(0.0, 0.0) if fixed_b[i] else (-mb, mb) for i in range(K)] + [(0.0, 0.0) if fixed_t[i] else (-mt, mt) for i in range(K)]
+    # Negative rates are drops and use their own configured limit; positive rates
+    # are builds. Do not assume a symmetric build/drop envelope.
+    bnds += [(0.0, 0.0) if fixed_b[i] else (-md, mb) for i in range(K)] + [(0.0, 0.0) if fixed_t[i] else (-mt, mt) for i in range(K)]
     if kop_min > 0 and abs(secs0[0]["build_deg_30m"]) < RATE_SNAP_DEG_30M:
         bnds[1] = (max(min_len, kop_min), bnds[1][1])
     x0 = np.array([min(max(v, lo), hi) for v, (lo, hi) in zip(x0, bnds)])
@@ -195,6 +200,8 @@ def _solve(azi0, secs0, mode, target_vectors, limits, interval_m, min_len, budge
         return x[0], [{"length_m": x[1 + i], "build_deg_30m": x[1 + K + i], "turn_deg_30m": x[1 + 2 * K + i]} for i in range(K)]
 
     def built(u):
+        if time.time() - t0 >= float(budget_s):
+            raise TimeoutError('Section optimization time budget exhausted.')
         key = u.tobytes()
         if key not in cache:
             if len(cache) > 4000: cache.clear()
@@ -207,6 +214,8 @@ def _solve(azi0, secs0, mode, target_vectors, limits, interval_m, min_len, budge
         return cache[key]
 
     def f(u):
+        if time.time() - t0 >= float(budget_s):
+            raise TimeoutError('Section optimization time budget exhausted.')
         _, secs = unpack(u)
         total = sum(s["length_m"] for s in secs)
         return total + 0.05 * sum(s["length_m"] * (s["build_deg_30m"] ** 2 + s["turn_deg_30m"] ** 2) for s in secs) + built(u)[4]
