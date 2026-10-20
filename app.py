@@ -555,6 +555,7 @@ elif page=='Survey Manager':
     st.caption('Survey position uncertainty is now represented by a covariance-based development model. Configure the survey error parameters on the Anti-Collision page; a legacy scalar sigma remains in the project schema only for backward compatibility.')
     df=pd.DataFrame(project.get('surveys',[])); display_df=(df.copy() if not df.empty else pd.DataFrame([{'MD':0.,'Inc':0.,'Azi':0.}]))
     if 'MD' in display_df.columns: display_df['MD']=display_df['MD']*M_TO_FT
+    # Keep the editable survey input at source precision; result tables are rounded for display.
     edited=st.data_editor(display_df,num_rows='dynamic',use_container_width=True,hide_index=True,key='survey_editor')
     a,b,c=st.columns(3); interval_ft=a.number_input('DLS interval (ft)',10.,3280.,100.); interval=interval_ft*FT_TO_M; st.metric('TVDSS reference',f"KB {project.get('kb_m',0)*M_TO_FT:.2f} ft MSL"); do=c.button('Calculate & store trajectory',type='primary')
     if do:
@@ -589,9 +590,14 @@ elif page=='Survey Manager':
         cov_cols=[c for c in sv.columns if c.startswith('Cov_')]
         uncertainty_cols=[c for c in sv.columns if c.startswith('Unc_')]
         display_cols=[c for c in sv.columns if c not in cov_cols+uncertainty_cols]
-        st.dataframe(sv[display_cols],use_container_width=True,hide_index=True)
-        # Export the currently stored/calculated Survey Manager trajectory in field units.
+        sv_display=sv[display_cols].copy()
+        for _angle_col in ('Inc','Azi'):
+            if _angle_col in sv_display.columns: sv_display[_angle_col]=sv_display[_angle_col].round(2)
+        st.dataframe(sv_display,use_container_width=True,hide_index=True)
+        # Export display precision for angles without changing the full-precision stored trajectory.
         export_df=sv[display_cols].copy()
+        for _angle_col in ('Inc','Azi'):
+            if _angle_col in export_df.columns: export_df[_angle_col]=export_df[_angle_col].round(2)
         csv_bytes=export_df.to_csv(index=False).encode('utf-8-sig')
         project_name=''.join(ch if ch.isalnum() or ch in '-_' else '_' for ch in str(project.get('well_name') or project.get('project_name') or 'well_survey'))
         st.download_button('Export survey as CSV', data=csv_bytes,
@@ -714,7 +720,18 @@ elif page=='Trajectory Planner':
                 min_kop_md_m=min_kop_m, max_kop_md_m=max_kop_m,
                 section_reoptimize=True, section_time_budget_s=search_budget_s*effort_config[effort]['section_share'],
             )
+            # Quantize the accepted survey stations before independent validation and persistence.
+            # Solver iterations deliberately retain full precision for numerical convergence; the
+            # trajectory delivered to the rest of the application is defined by 0.01-degree Inc/Azi.
+            out=out.copy()
+            out['Inc']=pd.to_numeric(out['Inc'],errors='raise').round(2)
+            out['Azi']=(pd.to_numeric(out['Azi'],errors='raise').round(2) % 360.0).round(2)
+            # Recompute positions and DLS from the quantized station angles so stored geometry,
+            # target checks, and downstream engineering modules all use the same trajectory.
+            out=minimum_curvature(out[['MD','Inc','Azi']])
             meta=dict(meta); meta['planning_mode']=planning_mode; meta['profile']='General control-point trajectory'
+            meta['trajectory_angle_precision_deg']=2
+            meta['trajectory_angle_precision_note']='Accepted/stored survey angles are rounded to 0.01°. Positions, DLS and acceptance checks are recomputed from these rounded stations; solver iterations retain full precision for numerical convergence.'
             meta['effort_preset']=effort; meta['configured_constraints']={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft),'max_build_rate_deg_30m':dls_100ft_to_30m(max_build_ft),'max_drop_rate_deg_30m':dls_100ft_to_30m(max_drop_ft),'max_turn_rate_deg_30m':dls_100ft_to_30m(max_turn_ft)}
             meta['kop_mode_ui']=kop_mode_ui; meta['kop_reference_md_ft']=kop_md_ft; meta['kop_tolerance_ft']=kop_tolerance_ft
     # ---- Independent acceptance for EVERY planning mode --------------------------------------
@@ -733,6 +750,16 @@ elif page=='Trajectory Planner':
             meta=dict(meta)
             meta['validation_status']=_val['status']; meta['validation_checks']=to_jsonable(_val['checks']); meta['survey_hash']=_val['survey_hash']
             meta['validator_version']=_val['validator_version']
+            # Replace optimizer metrics with metrics measured from the quantized, independently
+            # rebuilt trajectory; do not leave the UI showing pre-rounding geometry.
+            _qm=_val.get('metrics',{})
+            for _src,_dst in (('max_inclination_deg','max_inclination_deg'),('max_dls_deg_30m','max_dls_deg_30m'),
+                              ('max_build_rate_deg_30m','max_build_rate_actual_deg_30m'),('max_drop_rate_deg_30m','max_drop_rate_actual_deg_30m'),
+                              ('max_turn_rate_deg_30m','max_turn_rate_actual_deg_30m')):
+                if _src in _qm: meta[_dst]=float(_qm[_src])
+            if len(out):
+                meta['final_md_m']=float(out['MD'].iloc[-1]); meta['final_inclination_deg']=float(out['Inc'].iloc[-1]); meta['final_azimuth_deg']=float(out['Azi'].iloc[-1])
+                meta['endpoint_north_m']=float(out['Northing'].iloc[-1]); meta['endpoint_east_m']=float(out['Easting'].iloc[-1]); meta['endpoint_tvd_m']=float(out['TVD'].iloc[-1])
             if _val.get('target_results'):
                 meta['target_sequence_feasible']=all(bool(r.get('within_tolerance')) and bool(r.get('in_order')) for r in _val['target_results'])
                 meta['target_sequence_results']=to_jsonable(_val['target_results'])
@@ -789,7 +816,7 @@ elif page=='Trajectory Planner':
         if _proof: st.error('Proven infeasible (analytic bound, not a search failure): ' + ' '.join(_proof.get('reasons',[])))
         elif meta.get('optimization_status')=='NO_FEASIBLE_CANDIDATE_FOUND': st.info('NO FEASIBLE CANDIDATE FOUND means this search did not find a valid trajectory — it does not prove that none exists.')
         if meta.get('validation_checks'):
-            with st.expander(f"Independent validation: {meta.get('validation_status','—')}  •  result class: {meta.get('result_class',meta.get('status'))}", expanded=meta.get('status')!='PASS'):
+            with st.expander(f"Validation details · {meta.get('validation_status','—')}", expanded=False):
                 st.dataframe(pd.DataFrame(meta['validation_checks']).astype(str),use_container_width=True,hide_index=True)
                 st.caption('Every candidate — optimized or manual — is rebuilt from MD/Inc/Azi and re-checked before it can be PASS. PASS means the checks implemented here passed; it is not operational certification.')
         if meta.get('target_intercept_md_m') is not None:
@@ -805,7 +832,8 @@ elif page=='Trajectory Planner':
         if meta.get('section_schedule') is not None and saved_mode in ('General trajectory optimizer (experimental)', 'Trajectory Optimizer'):
             st.markdown('#### Section schedule')
             _sstat=meta.get('section_reconstruction_status','—')
-            (st.success if _sstat=='REOPTIMIZED' else st.info if _sstat in ('CLASSIFIED_ONLY','NOT_ATTEMPTED_INFEASIBLE_BASE') else st.warning)(f"Stage 2 section reconstruction: **{_sstat}** • trajectory source: **{meta.get('final_trajectory_source','—')}**. {meta.get('section_reconstruction_note','')}")
+            _s2summary=meta.get('stage2_summary') or meta.get('section_reconstruction_note','Sectionization status unavailable.')
+            (st.success if _sstat=='REOPTIMIZED' else st.info if _sstat in ('CLASSIFIED_ONLY','NOT_ATTEMPTED_INFEASIBLE_BASE') else st.warning)(f"**Stage 2 · {_sstat}** — {_s2summary}")
             _sched=pd.DataFrame(meta['section_schedule'])
             if not _sched.empty:
                 _v=pd.DataFrame({'Section':_sched.get('section',pd.Series(range(1,len(_sched)+1))),'Type':_sched['type'],
@@ -813,33 +841,45 @@ elif page=='Trajectory Planner':
                     'Start inc (°)':_sched['start_inc_deg'],'End inc (°)':_sched['end_inc_deg'],'Start azi (°)':_sched['start_azi_deg'],'End azi (°)':_sched['end_azi_deg'],
                     'Build/drop (°/100 ft)':_sched['build_drop_rate_deg_30m'].map(dls_30m_to_100ft),'Turn (°/100 ft)':_sched['turn_rate_deg_30m'].map(dls_30m_to_100ft),
                     'Max DLS (°/100 ft)':_sched['max_dls_deg_30m'].map(dls_30m_to_100ft)})
+                for _angle_col in ('Start inc (°)','End inc (°)','Start azi (°)','End azi (°)'):
+                    if _angle_col in _v.columns: _v[_angle_col]=_v[_angle_col].round(2)
                 st.dataframe(_v,use_container_width=True,hide_index=True)
             _chk=meta.get('section_schedule_constraint_check',{})
             if _chk.get('violations'): st.error('Section-schedule constraint violations: '+'; '.join(_chk['violations']))
-            for _att in (meta.get('section_reoptimization') or {}).get('attempts',[]):
-                if meta.get('section_reconstruction_status')!='REOPTIMIZED': st.caption(f"Stage 2 attempt: {_att.get('sections')} sections, {_att.get('mode')} rates → {_att.get('validation_status','not validated')} {_att.get('violations') or ''} {_att.get('message','')[:90]}")
+            _attempts=(meta.get('section_reoptimization') or {}).get('attempts',[])
+            if _attempts and _sstat!='REOPTIMIZED':
+                with st.expander(f"Sectionization diagnostics · {len(_attempts)} attempts", expanded=False):
+                    _diag=pd.DataFrame([{'Sections':a.get('sections'),'Mode':a.get('mode'),'Solver':('converged' if a.get('solver_success') else 'not converged'),'Validation':a.get('validation_status','not validated'),'Issues':', '.join(map(str,a.get('violations') or [])) or '—','Message':str(a.get('message',''))[:140]} for a in _attempts])
+                    st.dataframe(_diag,use_container_width=True,hide_index=True)
             _s1,_fm=meta.get('stage1_metrics'),meta.get('final_metrics')
             if _s1 and _fm:
                 st.markdown('#### Trajectory comparison: Stage 1 feasible path vs final')
                 _rows=[('Final MD (ft)','final_md_m',M_TO_FT),('Final TVD (ft)','final_tvd_m',M_TO_FT),('KOP MD (ft)','kop_md_m',M_TO_FT),('Max inclination (°)','max_inclination_deg',1.0),
                        ('Max DLS (°/100 ft)','max_dls_deg_30m',dls_30m_to_100ft(1.0)),('Max build/drop (°/100 ft)','max_build_rate_deg_30m',dls_30m_to_100ft(1.0)),('Max turn (°/100 ft)','max_turn_rate_deg_30m',dls_30m_to_100ft(1.0))]
-                st.dataframe(pd.DataFrame([{'Metric':lbl,'Stage 1':float(_s1[k])*f,'Final':float(_fm[k])*f,'Change':(float(_fm[k])-float(_s1[k]))*f} for lbl,k,f in _rows]),use_container_width=True,hide_index=True)
+                _comparison=pd.DataFrame([{'Metric':lbl,'Stage 1':float(_s1[k])*f,'Final':float(_fm[k])*f,'Change':(float(_fm[k])-float(_s1[k]))*f} for lbl,k,f in _rows])
+                _angle_metrics=_comparison['Metric'].str.contains('inclination|azimuth',case=False,regex=True)
+                for _col in ('Stage 1','Final','Change'):
+                    _comparison.loc[_angle_metrics,_col]=_comparison.loc[_angle_metrics,_col].round(2)
+                st.dataframe(_comparison,use_container_width=True,hide_index=True)
         if meta.get('validation_checks'):
             _mrows=constraint_margin_rows(meta['validation_checks'])
             if _mrows:
-                st.markdown('#### Constraint margins')
-                _m=pd.DataFrame(_mrows); st.dataframe(_m.astype({c:'object' for c in _m.columns}),use_container_width=True,hide_index=True)
-                st.caption('Margin = limit − value (positive is inside the limit; units: m, deg or deg/30 m as stored). Target rows show the negative miss distance. Failed checks are listed above under constraint violations.')
+                with st.expander('Constraint margins', expanded=False):
+                    _m=pd.DataFrame(_mrows); st.dataframe(_m.astype({c:'object' for c in _m.columns}),use_container_width=True,hide_index=True)
+                    st.caption('Positive margin means inside the limit. Target rows show miss distance.')
         if saved_mode in ('Optimize selected profile to target', 'Optimize (free KOP)', 'Optimize (fixed KOP)', 'Optimize (KOP window)', 'General trajectory optimizer (experimental)', 'Trajectory Optimizer'):
             st.metric('Optimization outcome',meta.get('optimization_status','REVIEW'))
             st.caption(f"Objective score: {float(meta.get('objective_m',float('nan'))):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {float(meta.get('max_dls_deg_30m',float('nan'))):.2f}°/30 m")
-            if meta.get('optimization_status')!='FEASIBLE': st.warning('No candidate met all current target and trajectory constraints. The best candidate is shown for review; constraints have not been relaxed.')
+            if meta.get('optimization_status')!='FEASIBLE': st.warning('**Stage 1 · No validated path found.** ' + str(meta.get('stage1_summary','The best candidate is for review only; constraints were not relaxed.')))
             if saved_mode in ('General trajectory optimizer (experimental)', 'Trajectory Optimizer'):
-                st.caption(f"Optimizer: {meta.get('optimizer','—')} • Iterations: {meta.get('optimizer_iterations','—')} • Solves: {meta.get('search_solves',meta.get('optimizer_solves','—'))} • Elapsed: {meta.get('search_seconds','—')} s / {meta.get('search_budget_s','—')} s • Message: {meta.get('optimizer_message','—')}")
-                if meta.get('effort_preset'): st.caption(f"Effort preset: {meta.get('effort_preset')} • Global budget exhausted: {meta.get('search_budget_exhausted',False)} • KOP mode: {meta.get('kop_mode_ui','Automatic')}")
+                st.caption('**Stage 1 · ' + str(meta.get('stage1_summary','See diagnostics for details.')) + '**')
+                with st.expander('Optimizer diagnostics', expanded=False):
+                    st.caption(f"Solver: {meta.get('optimizer','—')} • Iterations: {meta.get('optimizer_iterations','—')} • Solves: {meta.get('search_solves',meta.get('optimizer_solves','—'))} • Elapsed: {meta.get('search_seconds','—')} s / {meta.get('search_budget_s','—')} s")
+                    st.caption(f"Effort: {meta.get('effort_preset','—')} • Budget exhausted: {meta.get('search_budget_exhausted',False)} • KOP mode: {meta.get('kop_mode_ui','Automatic')} • Solver message: {meta.get('optimizer_message','—')}")
+                    if meta.get('constraint_violations'): st.write('Validation issues:', ', '.join(map(str, meta.get('constraint_violations',[])[:8])))
                 if meta.get('max_drop_rate_actual_deg_30m') is not None: st.caption(f"Validated maximum drop rate: {dls_30m_to_100ft(float(meta.get('max_drop_rate_actual_deg_30m',0))):.2f}°/100 ft")
-                if meta.get('constraint_violations'):
-                    st.error('Constraint checks requiring review: ' + ', '.join(meta.get('constraint_violations', [])))
+                if meta.get('constraint_violations') and meta.get('optimization_status')=='FEASIBLE':
+                    st.warning('Some checks need review: ' + ', '.join(map(str, meta.get('constraint_violations', [])[:3])) + (' …' if len(meta.get('constraint_violations', []))>3 else ''))
                 if meta.get('collision_validation'):
                     st.markdown('#### Offset-well clearance validation')
                     collision_view=pd.DataFrame(meta['collision_validation'])
@@ -877,6 +917,8 @@ elif page=='Trajectory Planner':
             if cc in out_display.columns: out_display[cc]=out_display[cc]*M_TO_FT
         if 'TVD' in display_source.columns: out_display['TVDSS']=(float(project.get('kb_m',0))-display_source['TVD'])*M_TO_FT
         if 'DLS' in out_display.columns: out_display['DLS']=out_display['DLS'].map(lambda x:dls_for_interval_to_100ft(x,30.0))
+        for _angle_col in ('Inc','Azi'):
+            if _angle_col in out_display.columns: out_display[_angle_col]=out_display[_angle_col].round(2)
         st.dataframe(out_display,use_container_width=True,hide_index=True)
     elif project.get('surveys'):
         st.info('No saved trajectory-planner candidate is available yet. The Survey Manager may contain an imported or measured survey; generate a candidate here to create a persistent planned result.')
