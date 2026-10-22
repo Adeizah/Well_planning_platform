@@ -650,10 +650,12 @@ elif page=='Trajectory Planner':
     max_inc=float(project.get('design_constraints',{}).get('max_inclination_deg',57.0) or 57.0)
     default_hold=min(57.0,max_inc)
     # Unified trajectory optimizer: one search engine, one constraint configuration.
-    saved_profile=project.get('well_design','J-Profile')
-    saved_profile={'Build & Hold':'J-Profile','Build-Hold-Drop':'S-Profile'}.get(saved_profile,saved_profile)
-    profile=saved_profile
-    planning_mode='Trajectory Optimizer'
+    # This action is intentionally independent of the saved profile preset. Profile-based
+    # design workflows remain available elsewhere; this engine searches a free-form path.
+    profile='Independent (no predefined profile)'
+    planning_mode='Independent trajectory optimizer'
+    st.markdown('### Independent trajectory optimizer')
+    st.caption('This optimizer does not inherit J-, S-, horizontal or ERD profile geometry. It searches a free-form trajectory from the ordered targets and hard constraints; the shared validator independently checks the resulting survey.')
     st.markdown('### Trajectory constraints')
     dc=project.get('design_constraints',{})
     c1,c2,c3=st.columns(3)
@@ -722,7 +724,7 @@ elif page=='Trajectory Planner':
             # Recompute positions and DLS from the quantized station angles so stored geometry,
             # target checks, and downstream engineering modules all use the same trajectory.
             out=minimum_curvature(out[['MD','Inc','Azi']])
-            meta=dict(meta); meta['planning_mode']=planning_mode; meta['profile']='General control-point trajectory'
+            meta=dict(meta); meta['planning_mode']=planning_mode; meta['profile']='Independent (no predefined profile)'
             meta['trajectory_angle_precision_deg']=2
             meta['trajectory_angle_precision_note']='Accepted/stored survey angles are rounded to 0.01°. Positions, DLS and acceptance checks are recomputed from these rounded stations; solver iterations retain full precision for numerical convergence.'
             meta['effort_preset']=effort; meta['configured_constraints']={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft)}
@@ -775,7 +777,7 @@ elif page=='Trajectory Planner':
                 if _prev_surveys and len(_prev_surveys)>1 and _prev_src!='planned':
                     project['survey_backup']={'surveys':_prev_surveys,'trajectory_metadata':_prev_traj_meta,'saved_utc':datetime.utcnow().isoformat()+'Z','reason':'Replaced by a validated planner trajectory.'}
                 project['surveys']=records
-            project['well_design']=profile
+            # Do not overwrite the user's saved profile preset with the independent optimizer label.
             project['trajectory_metadata']={'planner':meta.get('planner', 'General control-point trajectory optimizer'),'planner_result':meta,'profile':profile,'planning_mode':planning_mode,'dls_interval_m':30.0,'dls_interval_ft':30.0*M_TO_FT,'calculated_utc':datetime.utcnow().isoformat()+'Z','survey_source':'planned'}
             project['planned_trajectory_metadata']=dict(project['trajectory_metadata'])
             attach_snapshot(project, project['planned_trajectory_metadata'], [x['name'] for x in target_sequence])
@@ -819,7 +821,7 @@ elif page=='Trajectory Planner':
                 if col in seq_display: seq_display[col.replace('_m','_ft')]=seq_display[col]*M_TO_FT
             st.dataframe(seq_display.drop(columns=[c for c in ['intercept_md_m','lateral_error_m','vertical_error_m','miss_distance_m'] if c in seq_display]),use_container_width=True,hide_index=True)
             st.caption('All required targets must be intercepted in order. The final required target defines the target-terminated TD when the complete trajectory is feasible.')
-        if meta.get('section_schedule') is not None and saved_mode in ('General trajectory optimizer (experimental)', 'Trajectory Optimizer'):
+        if meta.get('section_schedule') is not None and saved_mode in ('General trajectory optimizer (experimental)', 'Trajectory Optimizer', 'Independent trajectory optimizer'):
             st.markdown('#### Section schedule')
             _sstat=meta.get('section_reconstruction_status','—')
             _s2summary=meta.get('stage2_summary') or meta.get('section_reconstruction_note','Sectionization status unavailable.')
@@ -861,7 +863,7 @@ elif page=='Trajectory Planner':
             st.metric('Optimization outcome',meta.get('optimization_status','REVIEW'))
             st.caption(f"Objective score: {float(meta.get('objective_m',float('nan'))):.2f} m • Evaluations: {meta.get('optimizer_evaluations','—')} • Max DLS: {float(meta.get('max_dls_deg_30m',float('nan'))):.2f}°/30 m")
             if meta.get('optimization_status')!='FEASIBLE': st.warning('**Stage 1 · No validated path found.** ' + str(meta.get('stage1_summary','The best candidate is for review only; constraints were not relaxed.')))
-            if saved_mode in ('General trajectory optimizer (experimental)', 'Trajectory Optimizer'):
+            if saved_mode in ('General trajectory optimizer (experimental)', 'Trajectory Optimizer', 'Independent trajectory optimizer'):
                 st.caption('**Stage 1 · ' + str(meta.get('stage1_summary','See diagnostics for details.')) + '**')
                 with st.expander('Optimizer diagnostics', expanded=False):
                     st.caption(f"Solver: {meta.get('optimizer','—')} • Iterations: {meta.get('optimizer_iterations','—')} • Solves: {meta.get('search_solves',meta.get('optimizer_solves','—'))} • Elapsed: {meta.get('search_seconds','—')} s / {meta.get('search_budget_s','—')} s")

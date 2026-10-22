@@ -49,3 +49,8 @@
 - Variable-rate builds may be returned as two or three consecutive "Build" sections with decreasing rates rather than a single build + tangent.
 
 ## Validation performed (see RELEASE_TEST_REPORT.md)
+
+
+## 2026-10-22 optimizer independence audit update
+
+See `OPTIMIZER_INDEPENDENCE_AND_VALIDATION_FIXES.md` for profile-independent search labeling, per-target approach-constraint objective correction, shared build-onset KOP estimation, seed metadata, and targeted tests. Full optimizer-heavy test groups did not finish within the available test window; do not treat them as passing.
