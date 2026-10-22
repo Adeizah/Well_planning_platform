@@ -47,10 +47,11 @@ def test_validator_rejects_edited_stored_positions():
     assert v['status'] == STATUS_REVIEW and 'stored_positions_match_rebuilt' in v['violations']
 
 
-def test_validator_flags_dls_build_and_inclination_violations():
+def test_validator_flags_dls_and_inclination_violations_without_component_rate_limits():
     raw = _j_profile(end_inc=60.0, build_md=150.0)                  # 60 deg in 150 m = 12 deg/30 m
     v = validate_trajectory(raw, targets=[_target_at_end(raw)], constraints={**LIMITS, 'max_inclination_deg': 50.0})
-    assert {'maximum_DLS', 'maximum_build_rate', 'maximum_inclination'} <= set(v['violations'])
+    assert {'maximum_DLS', 'maximum_inclination'} <= set(v['violations'])
+    assert 'maximum_build_rate' not in v['violations']
 
 
 def test_validator_flags_missed_target_and_wrong_order():

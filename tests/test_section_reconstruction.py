@@ -18,4 +18,5 @@ def test_section_schedule_classifies_vertical_build_and_tangent():
 def test_section_validator_flags_rate_limit():
     report=validate_section_schedule([{'max_dls_deg_30m':4,'build_drop_rate_deg_30m':4,'turn_rate_deg_30m':4}],
         max_dls_deg_30m=3,max_build_rate_deg_30m=3,max_turn_rate_deg_30m=3)
-    assert report['status']=='REVIEW' and len(report['violations'])==3
+    assert report['status']=='REVIEW' and len(report['violations'])==1
+    assert 'DLS limit exceeded' in report['violations'][0]

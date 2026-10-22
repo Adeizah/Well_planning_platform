@@ -35,17 +35,16 @@ def test_target_can_be_added_and_edited_and_editing_marks_the_plan_for_review():
     assert err is None and t['name'] == 'T1-renamed' and abs(t['tolerance_m'] - 60.0 * 0.3048) < 1e-6
 
 
-def test_unified_optimizer_uses_the_configured_build_drop_constraints():
+def test_unified_optimizer_uses_the_single_configured_dls_constraint():
     p = _project()
     fake, err = run_app('Trajectory Planner', p, overrides={
-        'Maximum build rate (°/100 ft)': 2.0,
-        'Maximum drop rate (°/100 ft)': 1.5,
+        'Maximum DLS (°/100 ft)': 2.0,
         'Optimization effort': 'Fast',
     }, clicks=['Optimize trajectory'])
     pr = fake.session_state['project']; res = pr['planned_trajectory_metadata']['planner_result']
     assert err is None
-    assert res['configured_constraints']['max_build_rate_deg_30m'] == 2.0 * 30.0 / 30.48
-    assert res['configured_constraints']['max_drop_rate_deg_30m'] == 1.5 * 30.0 / 30.48
+    assert res['configured_constraints']['max_dls_deg_30m'] == 2.0 * 30.0 / 30.48
+    assert 'max_build_rate_deg_30m' not in res['configured_constraints']
     assert res['effort_preset'] == 'Fast'
 
 

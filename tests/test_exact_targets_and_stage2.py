@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core.exact_targets import closest_point_on_path, arc_position, POINT_NUMERIC_TOL_M
+from core.exact_targets import closest_point_on_path, arc_position, POINT_NUMERIC_TOL_M, POINT_TARGET_ACCEPTANCE_TOL_M
 from core.general_optimizer import optimize_general_trajectory
 from core.geometry import target_contains
 from core.section_optimizer import (sections_to_stations, segment_path, initial_sections, reoptimize_sections, describe_sections, classify_section)
@@ -44,16 +44,21 @@ def test_closest_point_recovers_points_on_arcs_to_floating_point_precision():
         assert r["distance_m"] < 1e-9 and abs(r["md"] - md) < 1e-6
 
 
-def test_point_target_has_no_engineering_tolerance_radius():
+def test_point_target_uses_two_foot_acceptance_but_keeps_center_as_objective():
     raw = _arc_path()[["MD", "Inc", "Azi"]]; p = minimum_curvature(raw)
-    pos, _, _ = arc_position(p, 9, 0.37)
-    on = {"name": "P", "tvd_m": pos[2], "north_m": pos[0], "east_m": pos[1]}
-    assert validate_trajectory(raw, targets=[on], constraints={}, require_final_at_target=False)["target_results"][0]["within_tolerance"]
-    for off in (0.01, 0.3, 0.4, 5.0):                               # the old 0.5 m numerical threshold would have accepted the small ones
-        t = {**on, "tvd_m": pos[2] + off}
-        r = validate_trajectory(raw, targets=[t], constraints={}, require_final_at_target=False)["target_results"][0]
+    on = {"name": "P", "tvd_m": float(p.TVD.iloc[-1]), "north_m": float(p.Northing.iloc[-1]), "east_m": float(p.Easting.iloc[-1])}
+    assert validate_trajectory(raw, targets=[on], constraints={})["target_results"][0]["within_tolerance"]
+    # 2 ft = 0.6096 m is the 3-D acceptance envelope; the optimizer still minimizes miss to centre.
+    assert abs(POINT_TARGET_ACCEPTANCE_TOL_M - 0.6096) < 1e-12
+    for off in (0.01, 0.3, 0.6095):
+        t = {**on, "tvd_m": on["tvd_m"] + off}
+        r = validate_trajectory(raw, targets=[t], constraints={})["target_results"][0]
+        assert r["within_tolerance"], off
+    for off in (0.6097, 0.8, 5.0):
+        t = {**on, "tvd_m": on["tvd_m"] + off}
+        r = validate_trajectory(raw, targets=[t], constraints={})["target_results"][0]
         assert not r["within_tolerance"], off
-    assert POINT_NUMERIC_TOL_M <= 1e-3                                # closure criterion only, far below any survey accuracy
+    assert POINT_NUMERIC_TOL_M <= 1e-3  # tight polishing criterion remains separate from acceptance
 
 
 def test_optimizer_closes_a_point_target_exactly():
