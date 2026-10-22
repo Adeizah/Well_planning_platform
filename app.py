@@ -649,13 +649,29 @@ elif page=='Trajectory Planner':
     default_az=(math.degrees(math.atan2(rel_e,rel_n))%360.0) if abs(rel_n)+abs(rel_e)>1e-9 else 0.0
     max_inc=float(project.get('design_constraints',{}).get('max_inclination_deg',57.0) or 57.0)
     default_hold=min(57.0,max_inc)
-    # Unified trajectory optimizer: one search engine, one constraint configuration.
-    # This action is intentionally independent of the saved profile preset. Profile-based
-    # design workflows remain available elsewhere; this engine searches a free-form path.
+    # Keep the saved design-profile selector visible in the Trajectory Planner.
+    # The independent optimizer is a separate method and deliberately does not inherit
+    # the selected profile geometry; the profile remains available for profile-based
+    # workflows and project design intent.
+    profile_options=['Vertical','J-Profile','S-Profile','Horizontal','ERD','Custom']
+    profile_labels={'J-Profile':'J-profile / Build & Hold','S-Profile':'S-profile / Build-Hold-Drop'}
+    saved_design=project.get('well_design','J-Profile')
+    saved_design={'Build & Hold':'J-Profile','Build-Hold-Drop':'S-Profile'}.get(saved_design,saved_design)
+    if saved_design not in profile_options: saved_design='J-Profile'
+    selected_profile=st.selectbox(
+        'Well design profile', profile_options,
+        index=profile_options.index(saved_design),
+        format_func=lambda x:profile_labels.get(x,x),
+        key='trajectory_planner_well_design_profile',
+        help='Select and save the project design profile. The Independent optimizer below intentionally searches without being restricted to this profile. The profile remains available to profile-based workflows.'
+    )
+    if selected_profile != saved_design:
+        project['well_design']=selected_profile
+        save()
     profile='Independent (no predefined profile)'
     planning_mode='Independent trajectory optimizer'
     st.markdown('### Independent trajectory optimizer')
-    st.caption('This optimizer does not inherit J-, S-, horizontal or ERD profile geometry. It searches a free-form trajectory from the ordered targets and hard constraints; the shared validator independently checks the resulting survey.')
+    st.caption(f'The selected project profile is **{profile_labels.get(selected_profile, selected_profile)}**, but this optimization method does not inherit its geometry. It searches a free-form trajectory from the ordered targets and hard constraints; the shared validator independently checks the resulting survey.')
     st.markdown('### Trajectory constraints')
     dc=project.get('design_constraints',{})
     c1,c2,c3=st.columns(3)
