@@ -261,3 +261,26 @@ def test_failed_multi_target_candidate_is_not_clipped_before_later_targets():
               'target_intercept_md_m': 100.0}
     shown = display_path(path, result)
     assert float(shown.MD.iloc[-1]) == float(path.MD.iloc[-1])
+
+
+def test_kop_estimator_uses_start_of_sustained_build_not_half_degree_crossing():
+    from core.kop import estimate_kop_md
+    md = np.arange(0.0, 1000.0 + 20.0, 20.0)
+    inc = np.linspace(0.0, 2.0, len(md))
+    assert estimate_kop_md(md, inc, build_rate_threshold_deg_30m=0.02, sustained_intervals=2) == 0.0
+
+
+def test_kop_estimator_finds_delayed_build_onset():
+    from core.kop import estimate_kop_md
+    md = np.arange(0.0, 1000.0 + 20.0, 20.0)
+    inc = np.zeros_like(md)
+    inc[25:] = np.linspace(0.0, 20.0, len(md) - 25)
+    assert estimate_kop_md(md, inc, build_rate_threshold_deg_30m=0.02, sustained_intervals=2) == 500.0
+
+
+def test_validator_reports_geometric_kop_at_build_onset():
+    raw = _j_profile(end_inc=45.0, build_md=450.0, end_md=1800.0, step=30.0)
+    result = validate_trajectory(raw, constraints={**LIMITS, 'min_kop_md_m': 299.0, 'max_kop_md_m': 301.0})
+    assert abs(result['metrics']['kop_md_m'] - 300.0) < 1e-6
+    check = next(c for c in result['checks'] if c['check'] == 'KOP_restriction')
+    assert check['status'] == STATUS_PASS
