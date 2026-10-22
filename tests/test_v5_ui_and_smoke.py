@@ -122,3 +122,14 @@ def test_anti_collision_translates_main_and_offset_into_common_project_frame():
     rep=clearance_report(main,offsets,1.0,1.0,main_surface_easting_m=1000,main_surface_northing_m=2000)
     assert len(rep)==1
     assert abs(float(rep.iloc[0]['separation_m'])-100.0) < 1.0
+
+
+def test_trajectory_planner_keeps_profile_options_visible_and_optimizer_independent():
+    app = Path(__file__).parents[1] / "app.py"
+    text = app.read_text()
+    assert "Well design profile" in text
+    assert "trajectory_planner_well_design_profile" in text
+    assert "The selected project profile is" in text
+    assert "does not inherit its geometry" in text
+    for profile in ["'Vertical'", "'J-Profile'", "'S-Profile'", "'Horizontal'", "'ERD'", "'Custom'"]:
+        assert profile in text
