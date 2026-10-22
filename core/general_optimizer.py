@@ -18,7 +18,7 @@ from core.geometry import target_tolerances
 from core.validation import (validate_trajectory, search_outcome, footprint_miss, survey_hash, STATUS_PASS,
                              STATUS_REVIEW, VALIDATOR_VERSION)
 from core.feasibility import reachability_screen
-from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M
+from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M, POINT_TARGET_ACCEPTANCE_TOL_M
 from scipy.optimize import least_squares
 from core.section_reconstruction import build_section_schedule, validate_section_schedule
 from core.section_optimizer import reoptimize_sections
@@ -234,8 +234,10 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
     ``core.feasibility.reachability_screen`` can additionally prove infeasibility analytically.
     """
     t_start = time.time()
-    # If no separate drop limit is supplied, retain the historical symmetric limit.
-    max_drop_rate_deg_30m = float(max_build_rate_deg_30m if max_drop_rate_deg_30m is None else max_drop_rate_deg_30m)
+    # Directional-change-rate policy: max DLS is the sole rate constraint. Legacy rate arguments remain accepted for API compatibility but are not enforced.
+    max_build_rate_deg_30m = float(max_dls_deg_30m)
+    max_drop_rate_deg_30m = float(max_dls_deg_30m)
+    max_turn_rate_deg_30m = float(max_dls_deg_30m)
     targets = [dict(t) for t in (targets or [])]
     offsets = list(offsets or [])
     if not targets:
@@ -244,8 +246,8 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         raise ValueError('Each target requires tvd_m, north_m and east_m in well-relative metres.')
     if max_md_m <= 0 or station_interval_m <= 0 or control_points < 4:
         raise ValueError('Maximum MD and station interval must be positive; use at least four control points.')
-    if min(max_inclination_deg, max_dls_deg_30m, max_build_rate_deg_30m, max_drop_rate_deg_30m, max_turn_rate_deg_30m) <= 0:
-        raise ValueError('Inclination, DLS, build-rate, drop-rate and turn-rate limits must be positive.')
+    if min(max_inclination_deg, max_dls_deg_30m) <= 0:
+        raise ValueError('Inclination and DLS limits must be positive.')
     final = targets[-1]
     target_tvd = float(final['tvd_m'])
     if target_tvd <= 0:
@@ -255,16 +257,14 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
     for t in targets:                                  # explicit per-target tolerance defaults
         t.setdefault('tolerance_m', float(target_tolerance_m))
 
-    constraints = {'max_inclination_deg': float(max_inclination_deg), 'max_dls_deg_30m': float(max_dls_deg_30m),
-                   'max_build_rate_deg_30m': float(max_build_rate_deg_30m), 'max_drop_rate_deg_30m': float(max_drop_rate_deg_30m), 'max_turn_rate_deg_30m': float(max_turn_rate_deg_30m),
-                   'max_md_m': float(max_md_m)}
+    constraints = {'max_inclination_deg': float(max_inclination_deg), 'max_dls_deg_30m': float(max_dls_deg_30m), 'max_md_m': float(max_md_m)}
     if min_kop_md_m is not None: constraints['min_kop_md_m'] = float(min_kop_md_m)
     if max_kop_md_m is not None: constraints['max_kop_md_m'] = float(max_kop_md_m)
     sigma = dict(uncertainty_parameters or {})
 
     # ---- analytic necessary-condition screen: can PROVE infeasibility (a failed search cannot)
     screen = reachability_screen(targets, max_inclination_deg=max_inclination_deg, max_dls_deg_30m=max_dls_deg_30m,
-                                 max_build_rate_deg_30m=max_build_rate_deg_30m, max_md_m=max_md_m,
+                                 max_md_m=max_md_m,
                                  min_kop_md_m=float(min_kop_md_m or 0.0))
 
     lo_z = min(max(1.0, float(final['tvd_m']) - target_tolerances(final, target_tolerance_m)[1]), float(max_md_m))
@@ -425,13 +425,13 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
                                            endpoint_only=(index == len(targets) - 1))
                 if pr is None:
                     results.append({'name': str(t.get('name', 'Target')), 'intercept_md_m': float('nan'), 'lateral_error_m': 1e6, 'vertical_error_m': 1e6,
-                                    'miss_distance_m': 1e6, 'within_tolerance': False, 'in_order': False, 'vertical_tolerance_m': POINT_NUMERIC_TOL_M,
+                                    'miss_distance_m': 1e6, 'within_tolerance': False, 'in_order': False, 'vertical_tolerance_m': POINT_TARGET_ACCEPTANCE_TOL_M, 'acceptance_tolerance_m': POINT_TARGET_ACCEPTANCE_TOL_M,
                                     'approach_constraints_pass': False, 'approach_azimuth_error_deg': 0.0, 'approach_inclination_error_deg': 0.0, 'plane_intersection_angle_deg': 0.0})
                     continue
                 md = pr['md']; approach = _approach_metrics(path, md, t)
                 results.append({'name': str(t.get('name', 'Target')), 'intercept_md_m': float(md), 'lateral_error_m': pr['lateral_m'], 'vertical_error_m': pr['vertical_m'],
-                                'miss_distance_m': pr['distance_m'], 'within_tolerance': bool(pr['distance_m'] <= POINT_NUMERIC_TOL_M), 'in_order': True,
-                                'vertical_tolerance_m': POINT_NUMERIC_TOL_M, 'exact_point_target': True, **approach})
+                                'miss_distance_m': pr['distance_m'], 'within_tolerance': bool(pr['distance_m'] <= POINT_TARGET_ACCEPTANCE_TOL_M), 'in_order': True,
+                                'vertical_tolerance_m': POINT_TARGET_ACCEPTANCE_TOL_M, 'acceptance_tolerance_m': POINT_TARGET_ACCEPTANCE_TOL_M, 'exact_point_target': True, **approach})
                 previous_md = md
                 continue
             if index == len(targets) - 1:
@@ -489,9 +489,6 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
                     score += 1e5 * (max(0.0, float(t.get('min_intersection_angle_deg', 0.0)) - angle) ** 2 + max(0.0, angle - float(t.get('max_intersection_angle_deg', 90.0))) ** 2)
         margin = 0.995
         score += 1e5 * float(np.sum(np.maximum(0.0, dls - max_dls_deg_30m * margin) ** 2))
-        score += 1e5 * float(np.sum(np.maximum(0.0, build - max_build_rate_deg_30m * margin) ** 2))
-        score += 1e5 * float(np.sum(np.maximum(0.0, drop - max_drop_rate_deg_30m * margin) ** 2))
-        score += 1e5 * float(np.sum(np.maximum(0.0, turn - max_turn_rate_deg_30m * margin) ** 2))
         score += 1e5 * float(np.sum(np.maximum(0.0, inc - max_inclination_deg * margin) ** 2))
         _k = int(np.argmax(inc > 0.5)) if (inc > 0.5).any() else None           # same definition as the validator: last vertical station
         kop_md = float((md[_k - 1] if _k else md[0]) if _k is not None else md[-1])
@@ -506,7 +503,6 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         score += 2.0 * float(np.mean(dls ** 2)) if len(dls) else 0.0   # prefer gentler curvature among feasible shapes
         score += 1e5 * collision_penalty(path)
         viol = (not all(r['within_tolerance'] and r['in_order'] for r in results)) or dls.max(initial=0) > max_dls_deg_30m + 1e-3 \
-            or build.max(initial=0) > max_build_rate_deg_30m + 1e-3 or drop.max(initial=0) > max_drop_rate_deg_30m + 1e-3 or turn.max(initial=0) > max_turn_rate_deg_30m + 1e-3 \
             or inc.max() > max_inclination_deg + 1e-3 or not all(r['approach_constraints_pass'] for r in results) or kop_bad
         return {'score': float(score), 'path': path, 'results': results, 'station_ok': not viol}
 
@@ -569,10 +565,6 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
                     res += [miss, max(0.0, abs(vert) - target_tolerances(t, target_tolerance_m)[1])]; prev = md_t
             inc = _arr(path, 'Inc'); azi = np.unwrap(np.radians(_arr(path, 'Azi'))); md = _arr(path, 'MD'); dmd = np.maximum(np.diff(md), 1e-9)
             res += list(10.0 * np.maximum(0.0, _arr(path, 'DLS')[1:] - max_dls_deg_30m * 0.999))
-            inc_rate = np.diff(inc) / dmd * 30.0
-            res += list(10.0 * np.maximum(0.0, np.maximum(inc_rate, 0.0) - max_build_rate_deg_30m * 0.999))
-            res += list(10.0 * np.maximum(0.0, np.maximum(-inc_rate, 0.0) - max_drop_rate_deg_30m * 0.999))
-            res += list(10.0 * np.maximum(0.0, np.abs(np.degrees(np.diff(azi))) / dmd * 30.0 - max_turn_rate_deg_30m * 0.999))
             res += list(10.0 * np.maximum(0.0, inc - max_inclination_deg * 0.999))
             res += list(0.02 * (u - u0))
             return np.asarray(res, float)
@@ -716,8 +708,7 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         stage1_df = minimum_curvature(pd.DataFrame({k: accepted['ev']['path'][k] for k in ('MD', 'Inc', 'Azi')}))
         baseline_metrics = _path_summary(stage1_df, accepted['val'])
         if section_reoptimize:
-            limits = {'max_inclination_deg': max_inclination_deg, 'max_dls_deg_30m': max_dls_deg_30m, 'max_build_rate_deg_30m': max_build_rate_deg_30m, 'max_drop_rate_deg_30m': max_drop_rate_deg_30m,
-                      'max_turn_rate_deg_30m': max_turn_rate_deg_30m, 'max_md_m': max_md_m, 'min_kop_md_m': min_kop_md_m}
+            limits = {'max_inclination_deg': max_inclination_deg, 'max_dls_deg_30m': max_dls_deg_30m, 'max_md_m': max_md_m, 'min_kop_md_m': min_kop_md_m}
             remaining_global_s = max(0.0, float(time_budget_s) - (time.time() - t_start))
             allocated_section_s = min(float(section_time_budget_s), remaining_global_s)
             if allocated_section_s > 0.5:
@@ -821,7 +812,7 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         sec_status = section_result.get('status') if feasible else 'NOT_ATTEMPTED_INFEASIBLE_BASE'
         if feasible and not section_reoptimize:
             sec_status = 'CLASSIFIED_ONLY'
-    section_check = validate_section_schedule(section_schedule, max_dls_deg_30m=max_dls_deg_30m, max_build_rate_deg_30m=max_build_rate_deg_30m, max_drop_rate_deg_30m=max_drop_rate_deg_30m, max_turn_rate_deg_30m=max_turn_rate_deg_30m)
+    section_check = validate_section_schedule(section_schedule, max_dls_deg_30m=max_dls_deg_30m)
     final_metrics = _path_summary(path, val)
     meta = {
         'planner': 'General control-point trajectory optimizer (engineering-development)',

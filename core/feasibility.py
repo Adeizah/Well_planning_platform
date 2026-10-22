@@ -63,7 +63,8 @@ def reachability_screen(targets, *, max_inclination_deg, max_dls_deg_30m, max_bu
     targets = list(targets or [])
     if not targets:
         return {"proven_infeasible": False, "reasons": [], "bounds": {}}
-    curvature = min(float(max_dls_deg_30m), float(max_build_rate_deg_30m)) if max_build_rate_deg_30m else float(max_dls_deg_30m)
+    # DLS is the sole directional-change-rate constraint. Legacy build-rate input is ignored.
+    curvature = float(max_dls_deg_30m)
     imax = float(max_inclination_deg)
     # ---- depth vs MD limit (MD >= TVD for any path)
     if max_md_m is not None:

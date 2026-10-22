@@ -4,9 +4,9 @@ A point target is a geometric constraint, not an area: the wellbore must pass th
 sampling (even every 0.5 m) only brackets the closest approach, so the solver here refines it on the
 true circular arcs between stations until the distance is at floating-point precision.
 
-``POINT_NUMERIC_TOL_M`` is NOT an engineering tolerance radius. It is the closure criterion for the
-numerical solve (0.1 mm, six orders of magnitude below any survey accuracy), needed because two
-floating-point positions are never identically equal.
+``POINT_NUMERIC_TOL_M`` is the tight numerical closure criterion used during polishing.
+``POINT_TARGET_ACCEPTANCE_TOL_M`` is the separate engineering acceptance envelope (2 ft in 3-D).
+The objective remains to minimize the miss distance to the target centre.
 """
 from __future__ import annotations
 
@@ -15,6 +15,9 @@ import math
 import numpy as np
 
 POINT_NUMERIC_TOL_M = 1.0e-4
+# Engineering acceptance envelope for point targets: 2 ft radial 3-D miss distance.
+# The optimizer still minimizes distance to the exact centre; this is only the pass/fail threshold.
+POINT_TARGET_ACCEPTANCE_TOL_M = 2.0 * 0.3048
 
 
 def _col(path, name):

@@ -9,6 +9,7 @@ import numpy as np
 from scipy.optimize import differential_evolution
 from core.trajectory import generate_profile_candidate, truncate_trajectory_at_md
 from core.geometry import target_contains, target_boundary
+from core.exact_targets import POINT_TARGET_ACCEPTANCE_TOL_M
 
 DROPPING = {'S-Profile', 'Build-Hold-Drop', 'Custom'}
 
@@ -95,6 +96,11 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
     DLS/inclination feasibility, and excessive MD. All distances are metres.
     """
     profile = str(profile)
+    # Platform-wide policy: the maximum DLS is the only directional-change-rate constraint.
+    # Keep legacy arguments in the signature for compatibility, but derive them from DLS.
+    max_build_rate_deg_30m = float(max_dls_deg_30m)
+    max_turn_rate_deg_30m = float(max_dls_deg_30m)
+    drop_rate_initial_deg_30m = float(max_dls_deg_30m)
     # Ordered required target sequence. Coordinates are well-relative metres.
     sequence = list(target_sequence or [])
     if sequence:
@@ -114,8 +120,8 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
         raise ValueError(f'Unsupported profile for optimization: {profile}')
     if target_tvd_m <= 0:
         raise ValueError('Target TVD must be positive.')
-    if max_inclination_deg <= 0 or max_dls_deg_30m <= 0 or max_build_rate_deg_30m <= 0:
-        raise ValueError('Inclination, DLS and build-rate constraints must be positive.')
+    if max_inclination_deg <= 0 or max_dls_deg_30m <= 0:
+        raise ValueError('Inclination and DLS constraints must be positive.')
     if profile == 'Vertical':
         path, meta = generate_profile_candidate('Vertical', 0, 1, 0, 0,
             target_tvd_m, target_north_m, target_east_m,
@@ -127,7 +133,7 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
             for item in sequence:
                 ilat, ivert, imd, imiss = _target_residual(path, float(item['tvd_m']), float(item['north_m']), float(item['east_m']), item.get('geometry'), float(item.get('tolerance_m', point_tolerance_m)))
                 ordered=imd>prev+1e-3
-                vertical_sequence_results.append({'name':str(item.get('name','Target')),'intercept_md_m':float(imd),'lateral_error_m':float(ilat),'vertical_error_m':float(ivert),'miss_distance_m':float(imiss),'within_tolerance':bool(imiss<=1.0 and abs(ivert)<=30.48),'in_order':bool(ordered)})
+                vertical_sequence_results.append({'name':str(item.get('name','Target')),'intercept_md_m':float(imd),'lateral_error_m':float(ilat),'vertical_error_m':float(ivert),'miss_distance_m':float(imiss),'within_tolerance':bool(imiss<=POINT_TARGET_ACCEPTANCE_TOL_M),'in_order':bool(ordered)})
                 prev=imd
             if vertical_sequence_results:
                 lat,vert,md,miss=(vertical_sequence_results[-1]['lateral_error_m'],vertical_sequence_results[-1]['vertical_error_m'],vertical_sequence_results[-1]['intercept_md_m'],vertical_sequence_results[-1]['miss_distance_m'])
@@ -225,7 +231,7 @@ def optimize_trajectory(profile, target_tvd_m, target_north_m, target_east_m,
                     geom = item.get("geometry")
                     ilat, ivert, imd, imiss = _target_residual(path, float(item["tvd_m"]), float(item["north_m"]), float(item["east_m"]), geom, float(item.get("tolerance_m", point_tolerance_m)))
                     ordered = imd > previous_md + 1e-3
-                    sequence_results.append({"name": str(item.get("name", "Target")), "intercept_md_m": float(imd), "lateral_error_m": float(ilat), "vertical_error_m": float(ivert), "miss_distance_m": float(imiss), "within_tolerance": bool(imiss <= 1.0 and abs(ivert) <= 30.48), "in_order": bool(ordered)})
+                    sequence_results.append({"name": str(item.get("name", "Target")), "intercept_md_m": float(imd), "lateral_error_m": float(ilat), "vertical_error_m": float(ivert), "miss_distance_m": float(imiss), "within_tolerance": bool(imiss <= POINT_TARGET_ACCEPTANCE_TOL_M), "in_order": bool(ordered)})
                     sequence_penalty += imiss + 4.0 * abs(ivert) + (0.0 if ordered else 100000.0)
                     previous_md = imd
                 # The final required target governs the endpoint and feasibility.

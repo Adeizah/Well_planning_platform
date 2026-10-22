@@ -27,7 +27,7 @@ import pandas as pd
 from core.geometry import target_boundary, target_contains, target_tolerances, DEFAULT_TOLERANCE_M
 from core.trajectory import minimum_curvature, interpolate_path
 from engineering.anti_collision import clearance_report
-from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M
+from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M, POINT_TARGET_ACCEPTANCE_TOL_M
 
 STATUS_PASS = "PASS"
 STATUS_REVIEW = "REVIEW"
@@ -113,7 +113,8 @@ def _approach(dense, target):
 def _evaluate_point_target(dense, target, start_md, endpoint_only):
     """Exact interception test for a point target: continuous closest approach on the arcs (3-D distance).
 
-    The only acceptance threshold is POINT_NUMERIC_TOL_M (floating-point closure), never an engineering radius.
+    Acceptance is a 2 ft 3-D radius around the target centre. The optimizer still aims for zero miss;
+    POINT_NUMERIC_TOL_M is reserved for numerical polishing, not pass/fail acceptance.
     """
     tgt = [float(target["north_m"]), float(target["east_m"]), float(target["tvd_m"])]
     pr = closest_point_on_path(dense, tgt, start_md=start_md, endpoint_only=endpoint_only)
@@ -123,14 +124,14 @@ def _evaluate_point_target(dense, target, start_md, endpoint_only):
     if k > 0 and abs(md[k - 1] - pr["md"]) < abs(md[k] - pr["md"]):
         k -= 1
     appr_ok, azi_d, inc_d, plane_a = _approach(dense, target)
-    ok = bool(pr["distance_m"] <= POINT_NUMERIC_TOL_M)
+    ok = bool(pr["distance_m"] <= POINT_TARGET_ACCEPTANCE_TOL_M)
     return {"name": str(target.get("name", "Target")), "intercept_md_m": float(pr["md"]), "lateral_error_m": float(pr["lateral_m"]),
             "vertical_error_m": float(pr["vertical_m"]), "miss_distance_m": float(pr["distance_m"]), "point_distance_3d_m": float(pr["distance_m"]),
             "within_tolerance": ok, "in_order": True, "exact_point_target": True,
             "approach_azimuth_deg": float(dense["Azi"].iloc[k]), "approach_inclination_deg": float(dense["Inc"].iloc[k]),
             "approach_azimuth_error_deg": float(azi_d[k]), "approach_inclination_error_deg": float(inc_d[k]),
             "plane_intersection_angle_deg": float(plane_a[k]), "approach_constraints_pass": bool(appr_ok[k]),
-            "vertical_tolerance_m": float(POINT_NUMERIC_TOL_M)}
+            "vertical_tolerance_m": float(POINT_TARGET_ACCEPTANCE_TOL_M), "acceptance_tolerance_m": float(POINT_TARGET_ACCEPTANCE_TOL_M)}
 
 
 def evaluate_target(dense, target, start_md=-1.0, endpoint_only=False, default_tol=DEFAULT_TOLERANCE_M):
@@ -267,11 +268,10 @@ def validate_trajectory(survey, *, targets=None, constraints=None, offsets=None,
                "max_station_spacing_m": float(dmd.max(initial=0.0)), "station_count": int(len(md))}
     kop_idx = np.flatnonzero(inc > float(constraints.get("kop_inc_threshold_deg", 0.5)))
     metrics["kop_md_m"] = float(md[kop_idx[0] - 1] if len(kop_idx) and kop_idx[0] > 0 else (md[kop_idx[0]] if len(kop_idx) else md[-1]))
+    # DLS is the single directional-change-rate constraint across the platform.
+    # Build/drop/turn component rates remain reported as diagnostics only.
     for key, label, value, tol in (("max_inclination_deg", "maximum_inclination", metrics["max_inclination_deg"], 1e-3),
-                                   ("max_dls_deg_30m", "maximum_DLS", metrics["max_dls_deg_30m"], 1e-3),
-                                   ("max_build_rate_deg_30m", "maximum_build_rate", metrics["max_build_rate_deg_30m"], 1e-3),
-                                   ("max_drop_rate_deg_30m", "maximum_drop_rate", metrics["max_drop_rate_deg_30m"], 1e-3),
-                                   ("max_turn_rate_deg_30m", "maximum_turn_rate", metrics["max_turn_rate_deg_30m"], 1e-3)):
+                                   ("max_dls_deg_30m", "maximum_DLS", metrics["max_dls_deg_30m"], 1e-3)):
         if constraints.get(key) is None:
             checks.append(_check(label, "N/A", value, None, "No limit supplied."))
         else:

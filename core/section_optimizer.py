@@ -180,9 +180,9 @@ def _solve(azi0, secs0, mode, target_vectors, limits, interval_m, min_len, budge
     K = len(secs0)
     x0 = np.concatenate(([azi0], [s["length_m"] for s in secs0], [s["build_deg_30m"] for s in secs0], [s["turn_deg_30m"] for s in secs0]))
     sc = np.concatenate(([30.0], np.full(K, 100.0), np.ones(K), np.ones(K)))
-    mb = float(limits["max_build_rate_deg_30m"])
-    md = float(limits.get("max_drop_rate_deg_30m", mb))
-    mt = float(limits["max_turn_rate_deg_30m"])
+    # One common DLS ceiling governs build, drop, turn and combined sections.
+    mdls = float(limits["max_dls_deg_30m"])
+    mb = md = mt = mdls
     kop_min = float(limits.get("min_kop_md_m") or 0.0)
     bnds = [(azi0 - 180.0, azi0 + 180.0)] + [(min_len, float(limits["max_md_m"]))] * K
     fixed_b = [mode == "practical" and abs(s["build_deg_30m"]) < RATE_SNAP_DEG_30M for s in secs0]

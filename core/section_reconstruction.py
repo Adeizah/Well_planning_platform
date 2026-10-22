@@ -60,18 +60,19 @@ def build_section_schedule(path: pd.DataFrame, *, max_dls_deg_30m: float = 3.0,
 
 
 def validate_section_schedule(schedule, *, max_dls_deg_30m: float,
-                              max_build_rate_deg_30m: float, max_turn_rate_deg_30m: float,
+                              max_build_rate_deg_30m: float | None = None,
+                              max_turn_rate_deg_30m: float | None = None,
                               max_drop_rate_deg_30m: float | None = None) -> dict:
+    """Validate section schedule against the platform's single directional-rate limit: DLS.
+
+    Legacy component-rate keyword arguments are accepted for compatibility but intentionally ignored.
+    """
     violations=[]
-    max_drop_rate_deg_30m = max_build_rate_deg_30m if max_drop_rate_deg_30m is None else float(max_drop_rate_deg_30m)
-    for i,s in enumerate(schedule):
-        if s['max_dls_deg_30m'] > max_dls_deg_30m + 1e-6: violations.append(f'Section {i+1}: DLS limit exceeded')
-        rate=float(s['build_drop_rate_deg_30m'])
-        if rate > max_build_rate_deg_30m + 1e-6: violations.append(f'Section {i+1}: build rate limit exceeded')
-        if rate < -max_drop_rate_deg_30m - 1e-6: violations.append(f'Section {i+1}: drop rate limit exceeded')
-        if abs(s['turn_rate_deg_30m']) > max_turn_rate_deg_30m + 1e-6: violations.append(f'Section {i+1}: turn rate limit exceeded')
+    for i, section in enumerate(schedule):
+        if float(section.get('max_dls_deg_30m', 0.0)) > float(max_dls_deg_30m) + 1e-6:
+            violations.append(f'Section {i+1}: DLS limit exceeded')
     return {'status':'PASS' if not violations else 'REVIEW','violations':violations,
-            'note':'Section classification only; not a re-optimized trajectory. Validate the underlying survey independently.'}
+            'note':'Single DLS constraint applied. Build/drop/turn rates are descriptive components; validate the underlying survey independently.'}
 
 
 def constraint_margin_rows(checks) -> list[dict]:
