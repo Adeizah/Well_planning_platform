@@ -456,7 +456,7 @@ elif page=='Project & Reference':
         st.error(f'CRS/reference calculation error: {e}')
     a,b,c=st.columns(3); project['north_reference']=a.selectbox('Primary north reference',['True North','Grid North','Magnetic North'],index=['True North','Grid North','Magnetic North'].index(project.get('north_reference','Grid North'))); depth_options=['MD / TVDSS','MD / TVD']; project['depth_reference']=b.selectbox('Depth reference',depth_options,index=depth_options.index(project.get('depth_reference','MD / TVDSS'))); project['status']=c.selectbox('Project status',['Planning','Draft','Under Review','Approved for Training'],index=['Planning','Draft','Under Review','Approved for Training'].index(project.get('status','Planning')))
     st.markdown('### Design constraints')
-    dc=project['design_constraints']; a,b,c=st.columns(3); dc['max_dls_deg_30m']=dls_100ft_to_30m(a.number_input('Max DLS (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_dls_deg_30m'])))); dc['max_inclination_deg']=b.number_input('Max inclination (°)',0.,180.,float(dc['max_inclination_deg'])); dc['max_build_rate_deg_30m']=dls_100ft_to_30m(c.number_input('Max build rate (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc['max_build_rate_deg_30m']))))
+    dc=project['design_constraints']; a,b=st.columns(2); dc['max_dls_deg_30m']=dls_100ft_to_30m(a.number_input('Maximum DLS (°/100 ft)',.1,20.,dls_30m_to_100ft(float(dc.get('max_dls_deg_30m',3.0))))); dc['max_inclination_deg']=b.number_input('Max inclination (°)',0.,180.,float(dc.get('max_inclination_deg',70.0)))
     st.markdown('### Reference calculations')
     st.caption('IGRF is the only geomagnetic model used by this project. Calculated or manually supplied reference values are stored centrally and reused by survey and trajectory workflows.')
     refdata = project.setdefault('reference_data', {})
@@ -656,17 +656,13 @@ elif page=='Trajectory Planner':
     planning_mode='Trajectory Optimizer'
     st.markdown('### Trajectory constraints')
     dc=project.get('design_constraints',{})
-    c1,c2,c3,c4=st.columns(4)
+    c1,c2,c3=st.columns(3)
     max_inc=float(c1.number_input('Maximum inclination (°)', min_value=1.0, max_value=90.0, value=float(dc.get('max_inclination_deg',70.0) or 70.0), key='unified_max_inc'))
     max_dls_ft=float(c2.number_input('Maximum DLS (°/100 ft)', min_value=0.1, max_value=15.0, value=float(dls_30m_to_100ft(dc.get('max_dls_deg_30m',3.0) or 3.0)), key='unified_max_dls'))
-    max_build_ft=float(c3.number_input('Maximum build rate (°/100 ft)', min_value=0.1, max_value=15.0, value=float(dls_30m_to_100ft(dc.get('max_build_rate_deg_30m',3.0) or 3.0)), key='unified_max_build'))
-    max_drop_ft=float(c4.number_input('Maximum drop rate (°/100 ft)', min_value=0.1, max_value=15.0, value=float(dls_30m_to_100ft(dc.get('max_drop_rate_deg_30m',dc.get('max_build_rate_deg_30m',3.0)) or 3.0)), key='unified_max_drop'))
-    c5,c6=st.columns(2)
-    max_turn_ft=float(c5.number_input('Maximum azimuth turn rate (°/100 ft)', min_value=0.1, max_value=15.0, value=float(dls_30m_to_100ft(dc.get('max_turn_rate_deg_30m',3.0) or 3.0)), key='unified_max_turn'))
-    effort=c6.selectbox('Optimization effort',['Fast','Balanced','Thorough'],index=1,key='unified_effort',help='Presets control the global wall-clock budget and solver iteration limit. Detailed counts are shown in diagnostics.')
+    effort=c3.selectbox('Optimization effort',['Fast','Balanced','Thorough'],index=1,key='unified_effort',help='Presets control the global wall-clock budget and solver iteration limit. Detailed counts are shown in diagnostics.')
     effort_config={'Fast':{'budget':30,'iterations':40,'section_share':0.20},'Balanced':{'budget':90,'iterations':80,'section_share':0.20},'Thorough':{'budget':180,'iterations':140,'section_share':0.20}}
     search_budget_s=float(effort_config[effort]['budget']); max_iter_general=int(effort_config[effort]['iterations'])
-    st.caption(f'{effort} effort: up to {search_budget_s:.0f} seconds total search budget, including section reconstruction. Build, drop, DLS and turn constraints are independently enforced and revalidated.')
+    st.caption(f'{effort} effort: up to {search_budget_s:.0f} seconds total search budget, including section reconstruction. All directional changes (build, drop, turn and combined movement) are governed by the single maximum DLS constraint.')
 
     st.markdown('### Kickoff point (KOP)')
     kop_mode_ui=st.radio('KOP constraint',['Automatic','Fixed MD','Within tolerance'],horizontal=True,key='unified_kop_mode',help='Automatic lets the optimizer choose KOP. Fixed MD constrains it to one measured depth. Within tolerance searches only inside the specified ± window.')
@@ -706,9 +702,6 @@ elif page=='Trajectory Planner':
                 max_md_m=provisional_md_limit,
                 max_inclination_deg=max_inc,
                 max_dls_deg_30m=dls_100ft_to_30m(max_dls_ft),
-                max_build_rate_deg_30m=dls_100ft_to_30m(max_build_ft),
-                max_drop_rate_deg_30m=dls_100ft_to_30m(max_drop_ft),
-                max_turn_rate_deg_30m=dls_100ft_to_30m(max_turn_ft),
                 station_interval_m=30.0, maxiter=max_iter_general,
                 surface_easting_m=surface_e, surface_northing_m=surface_n,
                 offsets=project.get('offsets',[]),
@@ -732,7 +725,7 @@ elif page=='Trajectory Planner':
             meta=dict(meta); meta['planning_mode']=planning_mode; meta['profile']='General control-point trajectory'
             meta['trajectory_angle_precision_deg']=2
             meta['trajectory_angle_precision_note']='Accepted/stored survey angles are rounded to 0.01°. Positions, DLS and acceptance checks are recomputed from these rounded stations; solver iterations retain full precision for numerical convergence.'
-            meta['effort_preset']=effort; meta['configured_constraints']={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft),'max_build_rate_deg_30m':dls_100ft_to_30m(max_build_ft),'max_drop_rate_deg_30m':dls_100ft_to_30m(max_drop_ft),'max_turn_rate_deg_30m':dls_100ft_to_30m(max_turn_ft)}
+            meta['effort_preset']=effort; meta['configured_constraints']={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft)}
             meta['kop_mode_ui']=kop_mode_ui; meta['kop_reference_md_ft']=kop_md_ft; meta['kop_tolerance_ft']=kop_tolerance_ft
     # ---- Independent acceptance for EVERY planning mode --------------------------------------
             # A generator's or optimizer's own verdict never decides validity. The candidate is rebuilt
@@ -741,8 +734,7 @@ elif page=='Trajectory Planner':
             _req_sf=float(min_sf)
             _val=validate_trajectory(out[['MD','Inc','Azi']], targets=target_sequence,
                 constraints={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft),
-                             'max_build_rate_deg_30m':dls_100ft_to_30m(max_build_ft),'max_drop_rate_deg_30m':dls_100ft_to_30m(max_drop_ft),
-                             'max_turn_rate_deg_30m':dls_100ft_to_30m(max_turn_ft),'max_md_m':provisional_md_limit,
+                             'max_md_m':provisional_md_limit,
                              'min_kop_md_m':min_kop_m,'max_kop_md_m':max_kop_m},
                 offsets=project.get('offsets',[]), surface_easting_m=surface_e, surface_northing_m=surface_n,
                 kb_m=float(project.get('kb_m',0) or 0), survey_error_model=dict(project.get('survey_metadata',{}).get('survey_error_parameters',{})),
@@ -753,9 +745,7 @@ elif page=='Trajectory Planner':
             # Replace optimizer metrics with metrics measured from the quantized, independently
             # rebuilt trajectory; do not leave the UI showing pre-rounding geometry.
             _qm=_val.get('metrics',{})
-            for _src,_dst in (('max_inclination_deg','max_inclination_deg'),('max_dls_deg_30m','max_dls_deg_30m'),
-                              ('max_build_rate_deg_30m','max_build_rate_actual_deg_30m'),('max_drop_rate_deg_30m','max_drop_rate_actual_deg_30m'),
-                              ('max_turn_rate_deg_30m','max_turn_rate_actual_deg_30m')):
+            for _src,_dst in (('max_inclination_deg','max_inclination_deg'),('max_dls_deg_30m','max_dls_deg_30m')):
                 if _src in _qm: meta[_dst]=float(_qm[_src])
             if len(out):
                 meta['final_md_m']=float(out['MD'].iloc[-1]); meta['final_inclination_deg']=float(out['Inc'].iloc[-1]); meta['final_azimuth_deg']=float(out['Azi'].iloc[-1])
@@ -855,7 +845,7 @@ elif page=='Trajectory Planner':
             if _s1 and _fm:
                 st.markdown('#### Trajectory comparison: Stage 1 feasible path vs final')
                 _rows=[('Final MD (ft)','final_md_m',M_TO_FT),('Final TVD (ft)','final_tvd_m',M_TO_FT),('KOP MD (ft)','kop_md_m',M_TO_FT),('Max inclination (°)','max_inclination_deg',1.0),
-                       ('Max DLS (°/100 ft)','max_dls_deg_30m',dls_30m_to_100ft(1.0)),('Max build/drop (°/100 ft)','max_build_rate_deg_30m',dls_30m_to_100ft(1.0)),('Max turn (°/100 ft)','max_turn_rate_deg_30m',dls_30m_to_100ft(1.0))]
+                       ('Max DLS (°/100 ft)','max_dls_deg_30m',dls_30m_to_100ft(1.0))]
                 _comparison=pd.DataFrame([{'Metric':lbl,'Stage 1':float(_s1[k])*f,'Final':float(_fm[k])*f,'Change':(float(_fm[k])-float(_s1[k]))*f} for lbl,k,f in _rows])
                 _angle_metrics=_comparison['Metric'].str.contains('inclination|azimuth',case=False,regex=True)
                 for _col in ('Stage 1','Final','Change'):
@@ -877,7 +867,6 @@ elif page=='Trajectory Planner':
                     st.caption(f"Solver: {meta.get('optimizer','—')} • Iterations: {meta.get('optimizer_iterations','—')} • Solves: {meta.get('search_solves',meta.get('optimizer_solves','—'))} • Elapsed: {meta.get('search_seconds','—')} s / {meta.get('search_budget_s','—')} s")
                     st.caption(f"Effort: {meta.get('effort_preset','—')} • Budget exhausted: {meta.get('search_budget_exhausted',False)} • KOP mode: {meta.get('kop_mode_ui','Automatic')} • Solver message: {meta.get('optimizer_message','—')}")
                     if meta.get('constraint_violations'): st.write('Validation issues:', ', '.join(map(str, meta.get('constraint_violations',[])[:8])))
-                if meta.get('max_drop_rate_actual_deg_30m') is not None: st.caption(f"Validated maximum drop rate: {dls_30m_to_100ft(float(meta.get('max_drop_rate_actual_deg_30m',0))):.2f}°/100 ft")
                 if meta.get('constraint_violations') and meta.get('optimization_status')=='FEASIBLE':
                     st.warning('Some checks need review: ' + ', '.join(map(str, meta.get('constraint_violations', [])[:3])) + (' …' if len(meta.get('constraint_violations', []))>3 else ''))
                 if meta.get('collision_validation'):
@@ -935,7 +924,7 @@ elif page=='Targets':
     t={'name':name,'type':typ,'north_m':n,'east_m':e,'tvdss_m':tvdss*FT_TO_M,'crs':project.get('crs'),'grid_units':'m'}
     with st.expander('Target tolerance and thickness', expanded=False):
         ta,tb,tc=st.columns(3)
-        t['tolerance_m']=ta.number_input('Lateral tolerance (ft)',0.0,5000.0,100.0,key='target_tol_ft',help='Point targets: acceptance radius. All targets: default vertical band when no vertical tolerance is given.')*FT_TO_M
+        t['tolerance_m']=ta.number_input('Lateral tolerance (ft)',0.0,5000.0,100.0,key='target_tol_ft',help='Point targets use a fixed 2 ft 3-D acceptance radius around the centre; optimization still aims for zero miss. For non-point targets, this is the lateral tolerance and default vertical band.')*FT_TO_M
         t['vertical_tolerance_m']=tb.number_input('Vertical tolerance (ft)',0.0,5000.0,100.0,key='target_vtol_ft')*FT_TO_M
         t['thickness_m']=tc.number_input('Target thickness (ft, 0 = not used)',0.0,5000.0,0.0,key='target_thick_ft',help='True vertical thickness of the target layer; the vertical acceptance band is at least half of it.')*FT_TO_M
     with st.expander('Advanced target orientation and approach constraints', expanded=False):
