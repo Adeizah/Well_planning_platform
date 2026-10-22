@@ -26,13 +26,14 @@ import pandas as pd
 
 from core.geometry import target_boundary, target_contains, target_tolerances, DEFAULT_TOLERANCE_M
 from core.trajectory import minimum_curvature, interpolate_path
+from core.kop import estimate_kop_md
 from engineering.anti_collision import clearance_report
 from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M, POINT_TARGET_ACCEPTANCE_TOL_M
 
 STATUS_PASS = "PASS"
 STATUS_REVIEW = "REVIEW"
 STATUS_NO_FEASIBLE = "NO FEASIBLE CANDIDATE FOUND"
-VALIDATOR_VERSION = "1.0"
+VALIDATOR_VERSION = "1.1"
 
 
 # --------------------------------------------------------------------------- helpers
@@ -260,14 +261,29 @@ def validate_trajectory(survey, *, targets=None, constraints=None, offsets=None,
     turn = np.abs(np.diff(az_un)) / dmd * 30.0
     az_defined = np.maximum(inc[:-1], inc[1:]) >= 0.5          # azimuth is undefined in a (near-)vertical hole
     turn_eff = np.where(az_defined, turn, 0.0)
-    metrics = {"max_inclination_deg": float(inc.max()), "max_dls_deg_30m": float(dls.max(initial=0.0)),
+    # Inclination can peak between survey stations on a combined build/turn arc.
+    # Sample the minimum-curvature arcs densely for inclination screening while DLS
+    # remains evaluated from each complete arc's dogleg angle normalized to 30 m.
+    dense_constraint_path = _dense(path, spacing_m=0.5)
+    dense_inc = dense_constraint_path["Inc"].to_numpy(float)
+    dense_inc_md = dense_constraint_path["MD"].to_numpy(float)
+    max_inc_idx = int(np.argmax(dense_inc))
+    max_dls_idx = int(np.argmax(dls)) if len(dls) else 0
+    metrics = {"max_inclination_deg": float(dense_inc[max_inc_idx]),
+               "max_inclination_md_m": float(dense_inc_md[max_inc_idx]),
+               "max_dls_deg_30m": float(dls.max(initial=0.0)),
+               "max_dls_segment_start_md_m": float(md[max_dls_idx]) if len(dls) else float(md[0]),
+               "max_dls_segment_end_md_m": float(md[max_dls_idx + 1]) if len(dls) else float(md[0]),
                "max_build_rate_deg_30m": float(build.max(initial=0.0)), "max_drop_rate_deg_30m": float(drop.max(initial=0.0)),
                "max_turn_rate_deg_30m": float(turn_eff.max(initial=0.0)),
                "final_md_m": float(md[-1]), "final_tvd_m": float(path.TVD.iloc[-1]), "final_north_m": float(path.Northing.iloc[-1]),
                "final_east_m": float(path.Easting.iloc[-1]), "final_inclination_deg": float(inc[-1]), "final_azimuth_deg": float(azi[-1]),
                "max_station_spacing_m": float(dmd.max(initial=0.0)), "station_count": int(len(md))}
-    kop_idx = np.flatnonzero(inc > float(constraints.get("kop_inc_threshold_deg", 0.5)))
-    metrics["kop_md_m"] = float(md[kop_idx[0] - 1] if len(kop_idx) and kop_idx[0] > 0 else (md[kop_idx[0]] if len(kop_idx) else md[-1]))
+    metrics["kop_md_m"] = estimate_kop_md(
+        md, inc,
+        build_rate_threshold_deg_30m=float(constraints.get("kop_build_rate_threshold_deg_30m", 0.02)),
+        sustained_intervals=int(constraints.get("kop_sustained_intervals", 2)),
+    )
     # DLS is the single directional-change-rate constraint across the platform.
     # Build/drop/turn component rates remain reported as diagnostics only.
     for key, label, value, tol in (("max_inclination_deg", "maximum_inclination", metrics["max_inclination_deg"], 1e-3),

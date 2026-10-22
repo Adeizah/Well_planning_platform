@@ -22,6 +22,7 @@ from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M, POINT
 from scipy.optimize import least_squares
 from core.section_reconstruction import build_section_schedule, validate_section_schedule
 from core.section_optimizer import reoptimize_sections
+from core.kop import estimate_kop_md
 import time
 
 
@@ -478,20 +479,20 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
             score += sequence_weight * 1e8 * vertical_miss ** 2
             if not r['in_order']:
                 score += 1e12 * (target_index + 1)
-        if sequence_misses:
-            # Strongly discourage sacrificing any required waypoint to improve the
-            # terminal objective, especially the first target in the sequence.
-            score += 1e8 * max(sequence_misses) ** 2
+            # Every target's approach constraints must contribute to the search
+            # objective; validation remains the final hard acceptance gate.
             if not r['approach_constraints_pass']:
-                score += 1e5 * (r['approach_azimuth_error_deg'] ** 2 + r['approach_inclination_error_deg'] ** 2 + 100.0)
+                score += sequence_weight * 1e5 * (r['approach_azimuth_error_deg'] ** 2 + r['approach_inclination_error_deg'] ** 2 + 100.0)
                 if t.get('intersection_angle_enabled'):
                     angle = r['plane_intersection_angle_deg']
-                    score += 1e5 * (max(0.0, float(t.get('min_intersection_angle_deg', 0.0)) - angle) ** 2 + max(0.0, angle - float(t.get('max_intersection_angle_deg', 90.0))) ** 2)
+                    score += sequence_weight * 1e5 * (max(0.0, float(t.get('min_intersection_angle_deg', 0.0)) - angle) ** 2 + max(0.0, angle - float(t.get('max_intersection_angle_deg', 90.0))) ** 2)
+        if sequence_misses:
+            # Strongly discourage sacrificing any required waypoint to improve the terminal objective.
+            score += 1e8 * max(sequence_misses) ** 2
         margin = 0.995
         score += 1e5 * float(np.sum(np.maximum(0.0, dls - max_dls_deg_30m * margin) ** 2))
         score += 1e5 * float(np.sum(np.maximum(0.0, inc - max_inclination_deg * margin) ** 2))
-        _k = int(np.argmax(inc > 0.5)) if (inc > 0.5).any() else None           # same definition as the validator: last vertical station
-        kop_md = float((md[_k - 1] if _k else md[0]) if _k is not None else md[-1])
+        kop_md = estimate_kop_md(md, inc, build_rate_threshold_deg_30m=0.02, sustained_intervals=2)
         kop_bad = False
         if min_kop_md_m is not None:
             score += 1e5 * max(0.0, float(min_kop_md_m) - kop_md) ** 2
@@ -815,7 +816,8 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
     section_check = validate_section_schedule(section_schedule, max_dls_deg_30m=max_dls_deg_30m)
     final_metrics = _path_summary(path, val)
     meta = {
-        'planner': 'General control-point trajectory optimizer (engineering-development)',
+        'planner': 'Independent profile-free control-point trajectory optimizer (engineering-development)',
+        'optimizer_mode': 'independent_profile_free', 'random_seed': int(seed),
         'section_schedule': section_schedule,
         'section_reconstruction_status': sec_status,
         'section_reconstruction_note': section_result.get('message') or ('Sections classified from the accepted trajectory.' if sec_status == 'CLASSIFIED_ONLY' else 'Not attempted because Stage 1 did not produce a validated trajectory.'),
@@ -825,7 +827,7 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
         'stage1_metrics': baseline_metrics, 'final_metrics': final_metrics,
         'final_trajectory_source': 'section parameters (Stage 2)' if section_result.get('adopted') else ('Stage-1 control-point trajectory' if feasible else 'best-effort candidate (not valid)'),
         'section_schedule_constraint_check': section_check,
-        'optimizer': 'Multi-seed SciPy L-BFGS-B penalty refinement with adaptive variable-inclination/azimuth control points, validated by core.validation',
+        'optimizer': 'Independent multi-seed SciPy L-BFGS-B search with adaptive variable-inclination/azimuth control points; profile templates are not used to parameterize the search; final acceptance uses core.validation',
         'optimization_status': outcome['optimization_status'],
         'status': outcome['status'],
         'result_class': 'PASS' if feasible else ('REVIEW' if outcome['optimization_status'] == 'INFEASIBLE_PROVEN' else 'NO FEASIBLE CANDIDATE FOUND'),
