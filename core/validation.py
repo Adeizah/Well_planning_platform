@@ -307,15 +307,25 @@ def validate_trajectory(survey, *, targets=None, constraints=None, offsets=None,
             dm = dense_kop["MD"].to_numpy(float)
             pre = dm < k - 1e-6
             pre_inc = dense_kop["Inc"].to_numpy(float)[pre]
+            pre_azi = dense_kop["Azi"].to_numpy(float)[pre]
             pre_n = dense_kop["Northing"].to_numpy(float)[pre]
             pre_e = dense_kop["Easting"].to_numpy(float)[pre]
             max_pre_inc = float(np.max(np.abs(pre_inc), initial=0.0))
             max_pre_departure = float(np.max(np.hypot(pre_n, pre_e), initial=0.0))
-            vertical_ok = max_pre_inc <= 1e-6 and max_pre_departure <= 1e-4
+            # Azimuth has no physical meaning at zero inclination, but for stable
+            # survey representation require its stored placeholder to remain fixed
+            # before KOP. Use circular angular difference across 0/360 degrees.
+            if len(pre_azi):
+                azi_delta = np.abs((pre_azi - pre_azi[0] + 180.0) % 360.0 - 180.0)
+                max_pre_azi_change = float(np.max(azi_delta, initial=0.0))
+            else:
+                max_pre_azi_change = 0.0
+            vertical_ok = max_pre_inc <= 1e-6 and max_pre_departure <= 1e-4 and max_pre_azi_change <= 1e-6
             checks.append(_check("vertical_before_KOP", STATUS_PASS if vertical_ok else STATUS_REVIEW,
-                                 {"max_inclination_deg": max_pre_inc, "max_departure_m": max_pre_departure},
-                                 {"max_inclination_deg": 0.0, "max_departure_m": 0.0},
-                                 "Trajectory must remain vertical with zero lateral departure before the declared KOP."))
+                                 {"max_inclination_deg": max_pre_inc, "max_departure_m": max_pre_departure,
+                                  "max_azimuth_change_deg": max_pre_azi_change},
+                                 {"max_inclination_deg": 0.0, "max_departure_m": 0.0, "max_azimuth_change_deg": 0.0},
+                                 "Trajectory must remain vertical, have zero lateral departure, and keep a constant azimuth placeholder before the declared KOP."))
         okk = (lo is None or k >= float(lo) - 1e-3) and (hi is None or k <= float(hi) + 1e-3)
         checks.append(_check("KOP_restriction", STATUS_PASS if okk else STATUS_REVIEW, k, {"min": lo, "max": hi}))
     coarse = metrics["max_station_spacing_m"] > float(max_station_spacing_m)

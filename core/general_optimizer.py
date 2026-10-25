@@ -335,7 +335,14 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
             inc = np.where(mds <= planned_kop_md_m, 0.0, np.interp(post_s, frac, inc_c))
         else:
             inc = np.interp(mds / end_md, frac, inc_c)
-        azi = np.degrees(np.interp(mds / end_md, frac, np.unwrap(np.radians(azi_c)))) % 360.0
+        if planned_kop_md_m is not None:
+            # Azimuth is undefined on a vertical well. Carry a constant reference
+            # bearing through the vertical section; only allow steering at/after KOP.
+            # Interpolate steering controls over the post-KOP interval, not full MD.
+            post_azi = np.degrees(np.interp(post_s, frac, np.unwrap(np.radians(azi_c)))) % 360.0
+            azi = np.where(mds < planned_kop_md_m, float(final_bearing) % 360.0, post_azi)
+        else:
+            azi = np.degrees(np.interp(mds / end_md, frac, np.unwrap(np.radians(azi_c)))) % 360.0
         n_, e_, z_, d_ = mc_core(mds, inc, azi, 30.0)    # numpy kernel: identical numbers, ~15x cheaper than a validated DataFrame call
         return {'MD': mds, 'Inc': inc, 'Azi': azi, 'Northing': n_, 'Easting': e_, 'TVD': z_, 'DLS': d_}
 
