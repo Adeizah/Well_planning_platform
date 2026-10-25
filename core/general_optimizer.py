@@ -261,6 +261,15 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
     constraints = {'max_inclination_deg': float(max_inclination_deg), 'max_dls_deg_30m': float(max_dls_deg_30m), 'max_md_m': float(max_md_m)}
     if min_kop_md_m is not None: constraints['min_kop_md_m'] = float(min_kop_md_m)
     if max_kop_md_m is not None: constraints['max_kop_md_m'] = float(max_kop_md_m)
+    # Hard-KOP mode: when bounds are supplied, choose a deterministic KOP inside
+    # the interval and structurally keep the path vertical through that MD. The
+    # lower bound is used when both bounds exist (earliest allowed build onset).
+    planned_kop_md_m = None
+    if min_kop_md_m is not None or max_kop_md_m is not None:
+        planned_kop_md_m = float(min_kop_md_m if min_kop_md_m is not None else max_kop_md_m)
+        if planned_kop_md_m < 0 or planned_kop_md_m >= float(max_md_m):
+            raise ValueError('KOP must be non-negative and shallower than the maximum permitted MD.')
+        constraints['planned_kop_md_m'] = planned_kop_md_m
     sigma = dict(uncertainty_parameters or {})
 
     # ---- analytic necessary-condition screen: can PROVE infeasibility (a failed search cannot)
@@ -311,10 +320,22 @@ def optimize_general_trajectory(*, targets: list[dict], max_md_m: float,
 
     def make_path(x, N):
         end_md, inc_c, azi_c, frac = split(x, N)
+        if planned_kop_md_m is not None:
+            # The path must reach KOP before it can deviate. Ensure the candidate
+            # endpoint lies beyond KOP and include KOP as an exact survey station.
+            end_md = max(end_md, planned_kop_md_m + 1e-6)
         mds = np.linspace(0.0, end_md, count)
-        s = mds / end_md
-        inc = np.interp(s, frac, inc_c)
-        azi = np.degrees(np.interp(s, frac, np.unwrap(np.radians(azi_c)))) % 360.0
+        if planned_kop_md_m is not None:
+            mds = np.unique(np.concatenate([mds, [planned_kop_md_m]]))
+            post_span = max(end_md - planned_kop_md_m, 1e-9)
+            post_s = np.clip((mds - planned_kop_md_m) / post_span, 0.0, 1.0)
+            # Inclination controls are mapped over the post-KOP interval; the
+            # first control is exactly vertical at KOP and all pre-KOP inclinations
+            # are structurally fixed to zero (not encouraged by a penalty).
+            inc = np.where(mds <= planned_kop_md_m, 0.0, np.interp(post_s, frac, inc_c))
+        else:
+            inc = np.interp(mds / end_md, frac, inc_c)
+        azi = np.degrees(np.interp(mds / end_md, frac, np.unwrap(np.radians(azi_c)))) % 360.0
         n_, e_, z_, d_ = mc_core(mds, inc, azi, 30.0)    # numpy kernel: identical numbers, ~15x cheaper than a validated DataFrame call
         return {'MD': mds, 'Inc': inc, 'Azi': azi, 'Northing': n_, 'Easting': e_, 'TVD': z_, 'DLS': d_}
 

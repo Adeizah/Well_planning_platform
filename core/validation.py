@@ -33,7 +33,7 @@ from core.exact_targets import closest_point_on_path, POINT_NUMERIC_TOL_M, POINT
 STATUS_PASS = "PASS"
 STATUS_REVIEW = "REVIEW"
 STATUS_NO_FEASIBLE = "NO FEASIBLE CANDIDATE FOUND"
-VALIDATOR_VERSION = "1.1"
+VALIDATOR_VERSION = "1.2"
 
 
 # --------------------------------------------------------------------------- helpers
@@ -296,6 +296,26 @@ def validate_trajectory(survey, *, targets=None, constraints=None, offsets=None,
         lim = float(constraints["max_md_m"]); checks.append(_check("maximum_MD", STATUS_PASS if md[-1] <= lim + 1e-3 else STATUS_REVIEW, float(md[-1]), lim))
     if constraints.get("min_kop_md_m") is not None or constraints.get("max_kop_md_m") is not None:
         lo = constraints.get("min_kop_md_m"); hi = constraints.get("max_kop_md_m"); k = metrics["kop_md_m"]
+        planned = constraints.get("planned_kop_md_m")
+        # In hard-KOP mode, the declared KOP is authoritative and must itself be
+        # inside the permitted interval. Also check the reconstructed arc before
+        # KOP, not merely the survey stations, for any non-vertical deviation.
+        if planned is not None:
+            k = float(planned)
+            metrics["kop_md_m"] = k
+            dense_kop = _dense(path, spacing_m=0.25)
+            dm = dense_kop["MD"].to_numpy(float)
+            pre = dm < k - 1e-6
+            pre_inc = dense_kop["Inc"].to_numpy(float)[pre]
+            pre_n = dense_kop["Northing"].to_numpy(float)[pre]
+            pre_e = dense_kop["Easting"].to_numpy(float)[pre]
+            max_pre_inc = float(np.max(np.abs(pre_inc), initial=0.0))
+            max_pre_departure = float(np.max(np.hypot(pre_n, pre_e), initial=0.0))
+            vertical_ok = max_pre_inc <= 1e-6 and max_pre_departure <= 1e-4
+            checks.append(_check("vertical_before_KOP", STATUS_PASS if vertical_ok else STATUS_REVIEW,
+                                 {"max_inclination_deg": max_pre_inc, "max_departure_m": max_pre_departure},
+                                 {"max_inclination_deg": 0.0, "max_departure_m": 0.0},
+                                 "Trajectory must remain vertical with zero lateral departure before the declared KOP."))
         okk = (lo is None or k >= float(lo) - 1e-3) and (hi is None or k <= float(hi) + 1e-3)
         checks.append(_check("KOP_restriction", STATUS_PASS if okk else STATUS_REVIEW, k, {"min": lo, "max": hi}))
     coarse = metrics["max_station_spacing_m"] > float(max_station_spacing_m)
