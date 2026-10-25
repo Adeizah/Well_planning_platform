@@ -284,3 +284,29 @@ def test_validator_reports_geometric_kop_at_build_onset():
     assert abs(result['metrics']['kop_md_m'] - 300.0) < 1e-6
     check = next(c for c in result['checks'] if c['check'] == 'KOP_restriction')
     assert check['status'] == STATUS_PASS
+
+
+def test_hard_kop_requires_vertical_path_before_declared_kop():
+    # A path that starts building at 200 m must fail a declared 300 m KOP,
+    # even though its estimated build-onset KOP is within the broad bounds.
+    md = np.array([0., 100., 200., 300., 400., 500.])
+    inc = np.array([0., 0., 2., 4., 6., 8.])
+    raw = pd.DataFrame({'MD': md, 'Inc': inc, 'Azi': np.full_like(md, 90.)})
+    result = validate_trajectory(raw, constraints={**LIMITS, 'min_kop_md_m': 300.,
+                              'max_kop_md_m': 350., 'planned_kop_md_m': 300.},
+                              targets=[], check_anti_collision=False)
+    check = next(c for c in result['checks'] if c['check'] == 'vertical_before_KOP')
+    assert check['status'] == STATUS_REVIEW
+
+
+def test_hard_kop_accepts_vertical_path_until_declared_kop():
+    md = np.array([0., 100., 200., 300., 400., 500., 600.])
+    inc = np.array([0., 0., 0., 0., 2., 4., 6.])
+    raw = pd.DataFrame({'MD': md, 'Inc': inc, 'Azi': np.full_like(md, 90.)})
+    result = validate_trajectory(raw, constraints={**LIMITS, 'min_kop_md_m': 300.,
+                              'max_kop_md_m': 350., 'planned_kop_md_m': 300.},
+                              targets=[], check_anti_collision=False)
+    check = next(c for c in result['checks'] if c['check'] == 'vertical_before_KOP')
+    assert check['status'] == STATUS_PASS
+    kop = next(c for c in result['checks'] if c['check'] == 'KOP_restriction')
+    assert kop['status'] == STATUS_PASS
