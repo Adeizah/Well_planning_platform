@@ -735,8 +735,20 @@ elif page=='Trajectory Planner':
             # Solver iterations deliberately retain full precision for numerical convergence; the
             # trajectory delivered to the rest of the application is defined by 0.01-degree Inc/Azi.
             out=out.copy()
+            out['MD']=pd.to_numeric(out['MD'],errors='raise')
             out['Inc']=pd.to_numeric(out['Inc'],errors='raise').round(2)
             out['Azi']=(pd.to_numeric(out['Azi'],errors='raise').round(2) % 360.0).round(2)
+            # Enforce the hard pre-KOP rule on the final persisted survey too. The
+            # optimizer's internal controls are not trusted to define displayed rows.
+            # Azimuth is physically undefined while vertical, so carry the first
+            # station's bearing as a constant placeholder up to (but not including) KOP.
+            planned_kop_for_survey = min_kop_m if min_kop_m is not None else max_kop_m
+            if planned_kop_for_survey is not None and len(out):
+                pre_kop_mask = out['MD'] < float(planned_kop_for_survey) - 1e-6
+                if bool(pre_kop_mask.any()):
+                    fixed_azimuth = float(out.loc[out.index[0], 'Azi']) % 360.0
+                    out.loc[pre_kop_mask, 'Inc'] = 0.0
+                    out.loc[pre_kop_mask, 'Azi'] = fixed_azimuth
             # Recompute positions and DLS from the quantized station angles so stored geometry,
             # target checks, and downstream engineering modules all use the same trajectory.
             out=minimum_curvature(out[['MD','Inc','Azi']])
@@ -745,6 +757,7 @@ elif page=='Trajectory Planner':
             meta['trajectory_angle_precision_note']='Accepted/stored survey angles are rounded to 0.01°. Positions, DLS and acceptance checks are recomputed from these rounded stations; solver iterations retain full precision for numerical convergence.'
             meta['effort_preset']=effort; meta['configured_constraints']={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft)}
             meta['kop_mode_ui']=kop_mode_ui; meta['kop_reference_md_ft']=kop_md_ft; meta['kop_tolerance_ft']=kop_tolerance_ft
+            meta['planned_kop_md_m'] = (min_kop_m if min_kop_m is not None else max_kop_m)
     # ---- Independent acceptance for EVERY planning mode --------------------------------------
             # A generator's or optimizer's own verdict never decides validity. The candidate is rebuilt
             # from MD/Inc/Azi and re-checked (constraints between stations, ordered target interception,
@@ -753,7 +766,8 @@ elif page=='Trajectory Planner':
             _val=validate_trajectory(out[['MD','Inc','Azi']], targets=target_sequence,
                 constraints={'max_inclination_deg':max_inc,'max_dls_deg_30m':dls_100ft_to_30m(max_dls_ft),
                              'max_md_m':provisional_md_limit,
-                             'min_kop_md_m':min_kop_m,'max_kop_md_m':max_kop_m},
+                             'min_kop_md_m':min_kop_m,'max_kop_md_m':max_kop_m,
+                             'planned_kop_md_m': (min_kop_m if min_kop_m is not None else max_kop_m)},
                 offsets=project.get('offsets',[]), surface_easting_m=surface_e, surface_northing_m=surface_n,
                 kb_m=float(project.get('kb_m',0) or 0), survey_error_model=dict(project.get('survey_metadata',{}).get('survey_error_parameters',{})),
                 required_separation_factor=_req_sf, default_target_tolerance_m=30.48)
@@ -901,6 +915,18 @@ elif page=='Trajectory Planner':
         m4.metric('Final inclination',f"{float(meta.get('final_inclination_deg',pd.DataFrame(saved_records).iloc[-1].get('Inc',0))):.1f}°")
         detail=st.radio('Survey table detail',['Section endpoints (compact)','Full survey stations'],horizontal=True,index=0,key='planner_survey_detail',help='This only changes the displayed rows. The saved candidate is retained when navigating between pages.')
         display_source=pd.DataFrame(saved_records).copy().reset_index(drop=True)
+        # Normalize legacy saved candidates for display as well as newly calculated ones.
+        # Older saved results may predate the final-survey KOP fix and otherwise continue
+        # to show drifting azimuth placeholders even after the code has been updated.
+        _display_kop = meta.get('planned_kop_md_m')
+        if _display_kop is None and meta.get('kop_md_m') is not None and meta.get('kop_mode_ui') not in (None, 'Automatic'):
+            _display_kop = float(meta.get('kop_md_m'))
+        if _display_kop is not None and not display_source.empty and {'MD','Inc','Azi'}.issubset(display_source.columns):
+            _pre = pd.to_numeric(display_source['MD'], errors='coerce') < float(_display_kop) - 1e-6
+            if bool(_pre.any()):
+                _bearing = float(pd.to_numeric(display_source['Azi'], errors='coerce').iloc[0]) % 360.0
+                display_source.loc[_pre, 'Inc'] = 0.0
+                display_source.loc[_pre, 'Azi'] = _bearing
         if detail=='Section endpoints (compact)' and not display_source.empty:
             section_ends=meta.get('section_end_md_m',{})
             selected_indices={0,len(display_source)-1}; marker_names={}
