@@ -210,3 +210,9 @@ See `GAP_ANALYSIS.md` for evidence, tests and open items.
 - Added Fast/Balanced/Thorough global search presets and shared time budgeting for section reconstruction.
 - Added diagnostics and regression tests; preserve the validated general trajectory when section reconstruction cannot be adopted.
 - See `UNIFIED_TRAJECTORY_OPTIMIZER_UPDATE.md` for implementation notes and limitations.
+
+## Hard KOP vertical tie-in (2026-10-25)
+- Independent optimizer now treats a supplied KOP bound as a structural trajectory control: it selects a deterministic KOP within the allowed interval (the minimum bound when both bounds are supplied), includes an exact KOP station, and forces inclination to exactly 0° through KOP.
+- Independent validation checks the reconstructed minimum-curvature path for inclination and lateral departure before the declared KOP. This is a hard check, not a soft objective penalty.
+- The first build segment starts at KOP; DLS remains constrained across the first build interval and all later intervals.
+- This first implementation does not yet optimize the KOP location throughout a bounded interval; with both bounds, it uses the lower bound. The UI's profile-based workflows are unchanged.
